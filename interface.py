@@ -20,7 +20,8 @@ st.set_page_config(
 )
 
 # URL del backend
-BACKEND_URL = "http://localhost:8000"
+import os
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 # Estilos CSS personalizados
 st.markdown("""

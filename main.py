@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime
 import uvicorn
+import os
 
 from api_client import NBADataClient
 from engine import NBAPredictionEngine
@@ -327,10 +328,13 @@ if __name__ == "__main__":
     print("📊 Servidor corriendo en: http://localhost:8000")
     print("📖 Documentación disponible en: http://localhost:8000/docs")
     
+    port = int(os.environ.get("PORT", 8000))
+    reload = os.environ.get("ENV", "development") == "development"
+    
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
+        reload=reload,
         log_level="info"
     )
