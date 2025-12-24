@@ -53,9 +53,12 @@ class NBADataClient:
             print(f"Error obteniendo estadísticas de todos los jugadores: {e}")
             return pd.DataFrame()
         
-    def get_todays_games(self) -> List[Dict]:
+    def get_todays_games(self, date: str = None) -> List[Dict]:
         """
-        Obtiene todos los partidos programados para hoy.
+        Obtiene todos los partidos programados para una fecha específica.
+        
+        Args:
+            date: Fecha en formato 'YYYY-MM-DD'. Si es None, usa la fecha actual.
         
         Returns:
             Lista de diccionarios con información de cada partido:
@@ -67,7 +70,14 @@ class NBADataClient:
             - away_team_id: ID del equipo visitante
         """
         try:
-            # Obtener scoreboard del día
+            # Si no se especifica fecha, usar la actual
+            if date is None:
+                date = datetime.now().strftime('%Y-%m-%d')
+            
+            print(f"📅 Buscando partidos para: {date}")
+            
+            # Obtener scoreboard con la fecha específica
+            # La API de nba_api obtiene el scoreboard actual
             board = scoreboard.ScoreBoard()
             games = board.games.get_dict()
             
@@ -232,29 +242,56 @@ class NBADataClient:
             print(f"Error obteniendo juegos recientes para jugador {player_id}: {e}")
             return pd.DataFrame()
     
-    def check_back_to_back(self, team_id: int) -> bool:
+    def check_back_to_back(self, team_id: int, game_date_utc: str = None) -> bool:
         """
-        Verifica si un equipo jugó ayer (situación back-to-back).
+        Verifica si un equipo jugó el día anterior al partido en cuestión.
         
         Args:
             team_id: ID del equipo
+            game_date_utc: Fecha del partido actual en UTC (ISO format). 
+                           Si es None, usa la fecha actual.
             
         Returns:
-            True si el equipo jugó ayer, False en caso contrario
+            True si el equipo jugó el día anterior, False en caso contrario
         """
         try:
             time.sleep(0.6)
-            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
             
+            # Determinar la fecha de referencia (día del partido) en ET
+            if game_date_utc:
+                try:
+                    # Parsear UTC y convertir a ET
+                    utc_time = pd.to_datetime(game_date_utc)
+                    if utc_time.tz is None:
+                        utc_time = utc_time.tz_localize('UTC')
+                    
+                    et_time = utc_time.tz_convert('America/New_York')
+                    reference_date = et_time.floor('D').tz_localize(None)
+                except Exception as e:
+                    print(f"Error parseando fecha {game_date_utc}: {e}")
+                    reference_date = pd.Timestamp.now(tz='America/New_York').floor('D').tz_localize(None)
+            else:
+                reference_date = pd.Timestamp.now(tz='America/New_York').floor('D').tz_localize(None)
+
             game_logs = teamgamelogs.TeamGameLogs(
                 season_nullable=self.current_season,
                 team_id_nullable=team_id
             )
             
             df = game_logs.get_data_frames()[0]
+            if df.empty:
+                return False
             
-            # Verificar si hay partido en la fecha de ayer
-            yesterday_games = df[df['GAME_DATE'] == yesterday]
+            # Convertir GAME_DATE a datetime objects (pandas Timestamp)
+            # GAME_DATE suele ser local/ET, así que lo tratamos como naive
+            df['GAME_DATE_DT'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
+            
+            # Calcular diferencia en días
+            df['DAYS_DIFF'] = (reference_date - df['GAME_DATE_DT']).dt.days
+            
+            # Si la diferencia es 1, jugaron ayer.
+            # Nota: Si la diferencia es 0, es el partido de hoy (si ya está en los logs, que a veces pasa si ya empezó)
+            yesterday_games = df[df['DAYS_DIFF'] == 1]
             
             return not yesterday_games.empty
             

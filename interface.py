@@ -8,8 +8,15 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+from dateutil import parser, tz
 import time
 from typing import Dict, List
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+load_dotenv()
+
 
 # Configuración de la página
 st.set_page_config(
@@ -79,10 +86,17 @@ def check_backend_health() -> bool:
         return False
 
 
-def get_todays_games() -> List[Dict]:
+def get_todays_games(date: str = None) -> List[Dict]:
     """Obtiene los partidos del día desde el backend."""
     try:
-        response = requests.get(f"{BACKEND_URL}/api/games/today", timeout=30)
+        params = {}
+        if date:
+            params['date'] = date
+        response = requests.get(
+            f"{BACKEND_URL}/api/games/today",
+            params=params,
+            timeout=30
+        )
         if response.status_code == 200:
             return response.json()
         return []
@@ -97,7 +111,7 @@ def analyze_game(game_id: str) -> Dict:
         with st.spinner("🔍 Analizando partido y calculando proyecciones..."):
             response = requests.get(
                 f"{BACKEND_URL}/api/analysis/{game_id}",
-                timeout=120
+                timeout=720
             )
             if response.status_code == 200:
                 return response.json()
@@ -129,12 +143,30 @@ def format_bet_direction(direction: str) -> str:
         return "⚠️ NO BET"
 
 
+def format_game_time(utc_time_str: str) -> str:
+    """Convierte la hora UTC a hora local (ET) formateada."""
+    if not utc_time_str or utc_time_str == 'TBD':
+        return 'TBD'
+    try:
+        # Parsear la fecha UTC
+        utc_time = parser.parse(utc_time_str)
+        
+        # Convertir a Eastern Time (ET)
+        to_zone = tz.gettz('America/New_York')
+        local_time = utc_time.astimezone(to_zone)
+        
+        return local_time.strftime('%d/%m/%Y %I:%M %p ET')
+    except Exception:
+        return utc_time_str
+
+
 def display_game_card(game: Dict):
     """Muestra una tarjeta visual para un partido."""
+    formatted_time = format_game_time(game.get('game_time', 'TBD'))
     st.markdown(f"""
     <div class="game-card">
         <h3>🏀 {game['away_team']} @ {game['home_team']}</h3>
-        <p><strong>Hora:</strong> {game['game_time']}</p>
+        <p><strong>Hora:</strong> {formatted_time}</p>
         <p><strong>Game ID:</strong> {game['game_id']}</p>
     </div>
     """, unsafe_allow_html=True)
@@ -203,40 +235,91 @@ def display_bet_suggestion(bet: Dict, rank: int):
 
 def generate_gemini_analysis(game_data: Dict) -> str:
     """
-    Integración con Gemini API para análisis táctico del partido.
-    
-    NOTA: Requiere API key de Google Gemini.
-    Por ahora retorna análisis simulado.
+    Análisis táctico del partido usando Google Gemini API.
+    Requiere: GOOGLE_API_KEY en variables de entorno
     """
-    # TODO: Implementar conexión real con Gemini API
-    # from google import generativeai as genai
-    # genai.configure(api_key="TU_API_KEY")
-    # model = genai.GenerativeModel('gemini-pro')
-    
-    # Análisis simulado
-    home = game_data.get('home_team', 'Home')
-    away = game_data.get('away_team', 'Away')
-    
-    analysis = f"""
-    **Análisis Táctico del Partido**
-    
-    El enfrentamiento entre {away} y {home} promete ser un encuentro dinámico con 
-    múltiples oportunidades de valor en el mercado de jugadores individuales. 
-    
-    Basándonos en las tendencias recientes y los matchups defensivos, identificamos 
-    varias discrepancias significativas entre nuestras proyecciones estadísticas y 
-    las líneas del mercado. Los jugadores en situación de back-to-back podrían 
-    mostrar fatiga, mientras que aquellos con momentum positivo en sus últimos 
-    5 juegos presentan las mejores oportunidades.
-    
-    **Factores Clave a Considerar:**
-    - Ritmo de juego esperado y total de posesiones
-    - Ventajas de matchup en posiciones específicas
-    - Estado físico y minutos recientes de los jugadores clave
-    - Historial directo entre ambos equipos
-    """
-    
-    return analysis
+    try:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return "⚠️ API key de Gemini no configurada. Configura GOOGLE_API_KEY en .env"
+        
+        genai.configure(api_key=api_key)
+
+        # Selección dinámica de modelo compatible
+        selected_model = None
+        try:
+            models = list(genai.list_models())
+            # Filtrar modelos que soportan generateContent
+            candidates = [
+                m for m in models
+                if hasattr(m, 'supported_generation_methods')
+                and 'generateContent' in m.supported_generation_methods
+            ]
+            # Prioridad por versiones más nuevas
+            preferred_order = [
+                'gemini-1.5-flash-latest',
+                'gemini-1.5-pro-latest',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-1.0-pro',
+                'gemini-pro'
+            ]
+            # Mapear nombres disponibles
+            available_names = [
+                (getattr(m, 'name', '') or '')
+                .replace('models/','') for m in candidates
+            ]
+            for name in preferred_order:
+                if name in available_names:
+                    selected_model = name
+                    break
+        except Exception:
+            # Si falla el listado, usar fallback
+            selected_model = 'gemini-1.5-flash'
+
+        if not selected_model:
+            selected_model = 'gemini-1.5-flash'
+
+        model = genai.GenerativeModel(selected_model)
+        
+        home = game_data.get('home_team', 'Home')
+        away = game_data.get('away_team', 'Away')
+        
+        prompt = f"""
+        Proporciona un análisis táctico breve y profesional (máximo 300 palabras) del partido:
+        {away} vs {home} en la NBA.
+        
+        Incluye:
+        1. Matchups clave (1-2 comparaciones)
+        2. Factores principales que afectarán el juego (ritmo, defensa, lesiones)
+        3. Predicción general del resultado
+        
+        Formato: usa markdown con listas cortas.
+        """
+        
+        response = model.generate_content(prompt)
+        # Verificar si hay contenido
+        if response and hasattr(response, 'text'):
+            return response.text
+        elif response and hasattr(response, 'parts'):
+            return ''.join(part.text for part in response.parts)
+        else:
+            return "⚠️ No se recibió respuesta de Gemini"
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "404" in error_msg or "not found" in error_msg.lower():
+            return (
+                "❌ Error al conectar con Gemini: " + error_msg + "\n\n"
+                "Sugerencias:\n"
+                "- Actualiza el paquete: pip install --upgrade google-generativeai\n"
+                "- Usa modelos: gemini-1.5-flash-latest o gemini-1.5-pro-latest\n"
+                "- Verifica tu API key en .env (GOOGLE_API_KEY)\n"
+            )
+        return (
+            "❌ Error al obtener análisis de Gemini: " + error_msg + "\n\n"
+            "Verifica tu conexión a internet y que la API key sea válida."
+        )
 
 
 def main():
@@ -258,6 +341,13 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuración")
+        
+        # Selector de fecha
+        selected_date = st.date_input(
+            "📅 Selecciona una fecha:",
+            value=datetime.now().date()
+        )
+        date_str = selected_date.strftime('%Y-%m-%d') if selected_date else None
         
         refresh_button = st.button("🔄 Actualizar Partidos", use_container_width=True)
         
@@ -281,8 +371,15 @@ def main():
     
     # Obtener partidos del día
     if 'games' not in st.session_state or refresh_button:
-        with st.spinner("🔍 Cargando partidos de hoy..."):
-            st.session_state.games = get_todays_games()
+        with st.spinner("🔍 Cargando partidos..."):
+            st.session_state.games = get_todays_games(date=date_str)
+            st.session_state.current_date = date_str
+    
+    # Si cambió la fecha, recargar partidos
+    if 'current_date' in st.session_state and st.session_state.current_date != date_str:
+        with st.spinner("🔍 Cargando partidos..."):
+            st.session_state.games = get_todays_games(date=date_str)
+            st.session_state.current_date = date_str
     
     games = st.session_state.games
     

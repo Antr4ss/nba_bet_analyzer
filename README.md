@@ -239,7 +239,7 @@ def get_real_betting_line(player_name: str, stat_type: str) -> float:
     # Ejemplo con The Odds API
     response = requests.get(
         "https://api.the-odds-api.com/v4/sports/basketball_nba/odds",
-        params={"apiKey": "TU_API_KEY"}
+        params={"apiKey": "ea45c48e13e790058f7b49f25385bb7b"}
     )
     # Parsear y retornar línea específica
     pass

@@ -514,7 +514,7 @@ class NBAPredictionEngine:
         }
     
     def analyze_game(self, game_id: str, home_team_id: int, 
-                    away_team_id: int) -> List[Dict]:
+                    away_team_id: int, game_date_utc: str = None) -> List[Dict]:
         """
         Analiza un partido completo y genera todas las sugerencias de apuestas.
         
@@ -522,6 +522,7 @@ class NBAPredictionEngine:
             game_id: ID del partido
             home_team_id: ID del equipo local
             away_team_id: ID del equipo visitante
+            game_date_utc: Fecha del partido en UTC (opcional)
             
         Returns:
             Lista de mejores apuestas ordenadas por rating
@@ -536,8 +537,8 @@ class NBAPredictionEngine:
         
         # Verificar back-to-back para ambos equipos
         print("🏃 Verificando situación back-to-back...")
-        home_b2b = self.client.check_back_to_back(home_team_id)
-        away_b2b = self.client.check_back_to_back(away_team_id)
+        home_b2b = self.client.check_back_to_back(home_team_id, game_date_utc)
+        away_b2b = self.client.check_back_to_back(away_team_id, game_date_utc)
         
         if home_b2b:
             print("  ⚠️  Equipo local en back-to-back")

@@ -96,9 +96,12 @@ async def health_check():
 
 
 @app.get("/api/games/today", response_model=List[GameInfo])
-async def get_todays_games():
+async def get_todays_games(date: str = None):
     """
-    Obtiene todos los partidos programados para hoy.
+    Obtiene todos los partidos programados para una fecha específica.
+    
+    Args:
+        date: Fecha en formato 'YYYY-MM-DD'. Si es None, usa la fecha actual.
     
     Returns:
         Lista de partidos con información básica
@@ -107,7 +110,7 @@ async def get_todays_games():
         HTTPException: Si hay error obteniendo los datos
     """
     try:
-        games = nba_client.get_todays_games()
+        games = nba_client.get_todays_games(date=date)
         
         if not games:
             return []
@@ -164,7 +167,8 @@ async def analyze_game(game_id: str):
         best_bets = prediction_engine.analyze_game(
             game_id=game_id,
             home_team_id=target_game['home_team_id'],
-            away_team_id=target_game['away_team_id']
+            away_team_id=target_game['away_team_id'],
+            game_date_utc=target_game.get('game_time')
         )
         
         analysis = {
