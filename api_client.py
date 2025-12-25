@@ -7,7 +7,7 @@ Maneja la sincronización diaria de partidos, estadísticas de jugadores y repor
 from nba_api.live.nba.endpoints import scoreboard
 from nba_api.stats.endpoints import (
     leaguegamefinder, playergamelogs, commonplayerinfo,
-    leaguedashplayerstats, teamgamelogs
+    leaguedashplayerstats, teamgamelogs, scoreboardv2
 )
 from nba_api.stats.static import teams, players
 from datetime import datetime, timedelta
@@ -76,26 +76,69 @@ class NBADataClient:
             
             print(f"📅 Buscando partidos para: {date}")
             
-            # Obtener scoreboard con la fecha específica
-            # La API de nba_api obtiene el scoreboard actual
-            board = scoreboard.ScoreBoard()
-            games = board.games.get_dict()
+            # Verificar si es la fecha de hoy para usar endpoint en vivo
+            today = datetime.now().strftime('%Y-%m-%d')
             
-            todays_games = []
-            for game in games:
-                game_info = {
-                    'game_id': game['gameId'],
-                    'home_team': game['homeTeam']['teamName'],
-                    'away_team': game['awayTeam']['teamName'],
-                    'game_time': game.get('gameTimeUTC', 'TBD'),
-                    'home_team_id': game['homeTeam']['teamId'],
-                    'away_team_id': game['awayTeam']['teamId'],
-                    'home_team_tricode': game['homeTeam']['teamTricode'],
-                    'away_team_tricode': game['awayTeam']['teamTricode']
-                }
-                todays_games.append(game_info)
+            if date == today:
+                # Obtener scoreboard en vivo (mejor para el día actual)
+                board = scoreboard.ScoreBoard()
+                games = board.games.get_dict()
+                
+                todays_games = []
+                for game in games:
+                    game_info = {
+                        'game_id': game['gameId'],
+                        'home_team': game['homeTeam']['teamName'],
+                        'away_team': game['awayTeam']['teamName'],
+                        'game_time': game.get('gameTimeUTC', 'TBD'),
+                        'home_team_id': game['homeTeam']['teamId'],
+                        'away_team_id': game['awayTeam']['teamId'],
+                        'home_team_tricode': game['homeTeam']['teamTricode'],
+                        'away_team_tricode': game['awayTeam']['teamTricode']
+                    }
+                    todays_games.append(game_info)
+                return todays_games
             
-            return todays_games
+            else:
+                # Usar ScoreboardV2 para fechas pasadas o futuras
+                board = scoreboardv2.ScoreboardV2(game_date=date)
+                games_header = board.game_header.get_dict()
+                
+                # Mapa de equipos para buscar nombres por ID
+                teams_map = {t['id']: t for t in self.teams_data}
+                
+                todays_games = []
+                
+                # Indices de columnas en GameHeader
+                headers = games_header['headers']
+                if not games_header['data']:
+                    return []
+                    
+                idx_game_id = headers.index('GAME_ID')
+                idx_home_id = headers.index('HOME_TEAM_ID')
+                idx_away_id = headers.index('VISITOR_TEAM_ID')
+                idx_status = headers.index('GAME_STATUS_TEXT')
+                
+                for row in games_header['data']:
+                    home_id = row[idx_home_id]
+                    away_id = row[idx_away_id]
+                    
+                    home_team_info = teams_map.get(home_id, {})
+                    away_team_info = teams_map.get(away_id, {})
+                    
+                    game_info = {
+                        'game_id': row[idx_game_id],
+                        'home_team': home_team_info.get('nickname', 'Unknown'), # Usamos nickname (ej. Lakers) para consistencia
+                        'away_team': away_team_info.get('nickname', 'Unknown'),
+                        'game_time': row[idx_status],
+                        'home_team_id': home_id,
+                        'away_team_id': away_id,
+                        'home_team_tricode': home_team_info.get('abbreviation', ''),
+                        'away_team_tricode': away_team_info.get('abbreviation', '')
+                    }
+                    todays_games.append(game_info)
+                
+                return todays_games
             
         except Exception as e:
             print(f"Error obteniendo partidos del día: {e}")

@@ -7,6 +7,7 @@ Interfaz intuitiva para seleccionar partidos y visualizar sugerencias de apuesta
 import streamlit as st
 import requests
 import pandas as pd
+import matplotlib.pyplot as plt # Importación explícita para evitar errores en pandas
 from datetime import datetime
 from dateutil import parser, tz
 import time
@@ -105,18 +106,23 @@ def get_todays_games(date: str = None) -> List[Dict]:
         return []
 
 
-def analyze_game(game_id: str) -> Dict:
+def analyze_game(game_id: str, date: str = None) -> Dict:
     """Solicita el análisis completo de un partido al backend."""
     try:
         with st.spinner("🔍 Analizando partido y calculando proyecciones..."):
+            params = {}
+            if date:
+                params['date'] = date
+                
             response = requests.get(
                 f"{BACKEND_URL}/api/analysis/{game_id}",
+                params=params,
                 timeout=720
             )
             if response.status_code == 200:
                 return response.json()
             else:
-                st.error(f"Error en el análisis: {response.status_code}")
+                st.error(f"Error en el análisis: {response.status_code} - {response.text}")
                 return {}
     except Exception as e:
         st.error(f"Error comunicándose con el servidor: {e}")
@@ -422,7 +428,7 @@ def main():
         if analyze_button or f"analysis_{selected_game['game_id']}" in st.session_state:
             # Realizar análisis
             if analyze_button:
-                analysis = analyze_game(selected_game['game_id'])
+                analysis = analyze_game(selected_game['game_id'], date=date_str)
                 st.session_state[f"analysis_{selected_game['game_id']}"] = analysis
             else:
                 analysis = st.session_state[f"analysis_{selected_game['game_id']}"]

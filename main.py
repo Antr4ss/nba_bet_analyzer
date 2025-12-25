@@ -137,12 +137,13 @@ async def get_todays_games(date: str = None):
 
 
 @app.get("/api/analysis/{game_id}")
-async def analyze_game(game_id: str):
+async def analyze_game(game_id: str, date: str = None):
     """
     Analiza un partido específico y genera sugerencias de apuestas.
     
     Args:
         game_id: ID único del partido a analizar
+        date: Fecha del partido (opcional, para buscar en histórico)
         
     Returns:
         Análisis completo con mejores oportunidades de apuesta
@@ -152,13 +153,16 @@ async def analyze_game(game_id: str):
     """
     try:
         # Buscar información del partido
-        games = nba_client.get_todays_games()
+        # Si se proporciona fecha, buscar en esa fecha, si no, busca hoy
+        games = nba_client.get_todays_games(date=date)
         target_game = next((g for g in games if g['game_id'] == game_id), None)
         
         if not target_game:
+            # Si no se encuentra y no se especificó fecha, intentar buscar sin fecha (hoy)
+            # (Aunque get_todays_games() ya hace esto por defecto si date es None)
             raise HTTPException(
                 status_code=404,
-                detail=f"Partido {game_id} no encontrado"
+                detail=f"Partido {game_id} no encontrado para la fecha {date or 'hoy'}"
             )
         
         # Realizar análisis completo
