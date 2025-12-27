@@ -7,7 +7,7 @@ Maneja la sincronización diaria de partidos, estadísticas de jugadores y repor
 from nba_api.live.nba.endpoints import scoreboard
 from nba_api.stats.endpoints import (
     leaguegamefinder, playergamelogs, commonplayerinfo,
-    leaguedashplayerstats, teamgamelogs, scoreboardv2
+    leaguedashplayerstats, teamgamelogs, scoreboardv2, commonteamroster
 )
 from nba_api.stats.static import teams, players
 from datetime import datetime, timedelta
@@ -21,7 +21,19 @@ class NBADataClient:
     """Cliente para interactuar con la API de NBA y obtener datos estructurados."""
     
     def __init__(self):
-        self.current_season = "2024-25"
+        # Calcular temporada actual dinámicamente
+        # Si estamos en oct/nov/dic, la temporada empezó este año. Si no, empezó el año pasado.
+        now = datetime.now()
+        if now.month >= 10:
+            start_year = now.year
+            end_year = (now.year + 1) % 100
+        else:
+            start_year = now.year - 1
+            end_year = now.year % 100
+            
+        self.current_season = f"{start_year}-{end_year:02d}"
+        print(f"ℹ️ Temporada detectada: {self.current_season}")
+        
         self.teams_data = teams.get_teams()
         self.players_data = players.get_players()
         
@@ -76,69 +88,46 @@ class NBADataClient:
             
             print(f"📅 Buscando partidos para: {date}")
             
-            # Verificar si es la fecha de hoy para usar endpoint en vivo
-            today = datetime.now().strftime('%Y-%m-%d')
+            # Usamos ScoreboardV2 para todas las fechas (pasadas, presentes y futuras)
+            # El endpoint 'scoreboard' (live) a veces devuelve lista vacía temprano en el día
+            board = scoreboardv2.ScoreboardV2(game_date=date)
+            games_header = board.game_header.get_dict()
             
-            if date == today:
-                # Obtener scoreboard en vivo (mejor para el día actual)
-                board = scoreboard.ScoreBoard()
-                games = board.games.get_dict()
-                
-                todays_games = []
-                for game in games:
-                    game_info = {
-                        'game_id': game['gameId'],
-                        'home_team': game['homeTeam']['teamName'],
-                        'away_team': game['awayTeam']['teamName'],
-                        'game_time': game.get('gameTimeUTC', 'TBD'),
-                        'home_team_id': game['homeTeam']['teamId'],
-                        'away_team_id': game['awayTeam']['teamId'],
-                        'home_team_tricode': game['homeTeam']['teamTricode'],
-                        'away_team_tricode': game['awayTeam']['teamTricode']
-                    }
-                    todays_games.append(game_info)
-                return todays_games
+            # Mapa de equipos para buscar nombres por ID
+            teams_map = {t['id']: t for t in self.teams_data}
             
-            else:
-                # Usar ScoreboardV2 para fechas pasadas o futuras
-                board = scoreboardv2.ScoreboardV2(game_date=date)
-                games_header = board.game_header.get_dict()
+            todays_games = []
+            
+            # Indices de columnas en GameHeader
+            headers = games_header['headers']
+            if not games_header['data']:
+                return []
                 
-                # Mapa de equipos para buscar nombres por ID
-                teams_map = {t['id']: t for t in self.teams_data}
+            idx_game_id = headers.index('GAME_ID')
+            idx_home_id = headers.index('HOME_TEAM_ID')
+            idx_away_id = headers.index('VISITOR_TEAM_ID')
+            idx_status = headers.index('GAME_STATUS_TEXT')
+            
+            for row in games_header['data']:
+                home_id = row[idx_home_id]
+                away_id = row[idx_away_id]
                 
-                todays_games = []
+                home_team_info = teams_map.get(home_id, {})
+                away_team_info = teams_map.get(away_id, {})
                 
-                # Indices de columnas en GameHeader
-                headers = games_header['headers']
-                if not games_header['data']:
-                    return []
-                    
-                idx_game_id = headers.index('GAME_ID')
-                idx_home_id = headers.index('HOME_TEAM_ID')
-                idx_away_id = headers.index('VISITOR_TEAM_ID')
-                idx_status = headers.index('GAME_STATUS_TEXT')
-                
-                for row in games_header['data']:
-                    home_id = row[idx_home_id]
-                    away_id = row[idx_away_id]
-                    
-                    home_team_info = teams_map.get(home_id, {})
-                    away_team_info = teams_map.get(away_id, {})
-                    
-                    game_info = {
-                        'game_id': row[idx_game_id],
-                        'home_team': home_team_info.get('nickname', 'Unknown'), # Usamos nickname (ej. Lakers) para consistencia
-                        'away_team': away_team_info.get('nickname', 'Unknown'),
-                        'game_time': row[idx_status],
-                        'home_team_id': home_id,
-                        'away_team_id': away_id,
-                        'home_team_tricode': home_team_info.get('abbreviation', ''),
-                        'away_team_tricode': away_team_info.get('abbreviation', '')
-                    }
-                    todays_games.append(game_info)
-                
-                return todays_games
+                game_info = {
+                    'game_id': row[idx_game_id],
+                    'home_team': home_team_info.get('nickname', 'Unknown'), # Usamos nickname (ej. Lakers) para consistencia
+                    'away_team': away_team_info.get('nickname', 'Unknown'),
+                    'game_time': row[idx_status],
+                    'home_team_id': home_id,
+                    'away_team_id': away_id,
+                    'home_team_tricode': home_team_info.get('abbreviation', ''),
+                    'away_team_tricode': away_team_info.get('abbreviation', '')
+                }
+                todays_games.append(game_info)
+            
+            return todays_games
             
         except Exception as e:
             print(f"Error obteniendo partidos del día: {e}")
@@ -146,56 +135,72 @@ class NBADataClient:
     
     def get_injury_report(self) -> pd.DataFrame:
         """
-        Obtiene el reporte de lesiones actualizado.
-        
-        Nota: La NBA API oficial no tiene endpoint de lesiones actualizado.
-        Esta función retorna un DataFrame vacío. Para producción, considera
-        integrar APIs como:
-        - ESPN API
-        - RotoWire
-        - FantasyData
+        Obtiene el reporte de lesiones actualizado usando la API de ESPN.
         
         Returns:
-            DataFrame vacío (para evitar errores, asume que todos juegan)
+            DataFrame con columnas: PLAYER_NAME, Current_Status, Comment
         """
         try:
-            # Método alternativo: usar el scoreboard en vivo para detectar inactivos
-            board = scoreboard.ScoreBoard()
-            games = board.games.get_dict()
+            print("🏥 Consultando reporte de lesiones (ESPN)...")
+            url = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
             
             injured_players = []
             
-            for game in games:
-                # Verificar jugadores inactivos del equipo local
-                if 'homeTeam' in game and 'inactives' in game['homeTeam']:
-                    for player in game['homeTeam']['inactives']:
-                        injured_players.append({
-                            'PLAYER_NAME': player.get('name', 'Unknown'),
-                            'PLAYER_ID': player.get('personId', 0),
-                            'TEAM_ID': game['homeTeam'].get('teamId', 0),
-                            'Current_Status': 'Out',
-                            'Comment': 'Inactive for today\'s game'
-                        })
-                
-                # Verificar jugadores inactivos del equipo visitante
-                if 'awayTeam' in game and 'inactives' in game['awayTeam']:
-                    for player in game['awayTeam']['inactives']:
-                        injured_players.append({
-                            'PLAYER_NAME': player.get('name', 'Unknown'),
-                            'PLAYER_ID': player.get('personId', 0),
-                            'TEAM_ID': game['awayTeam'].get('teamId', 0),
-                            'Current_Status': 'Out',
-                            'Comment': 'Inactive for today\'s game'
-                        })
+            # Mapeo de estados de ESPN a nuestros estados
+            status_map = {
+                'Out': 'Out',
+                'Day-to-Day': 'Day-To-Day',
+                'Questionable': 'Questionable',
+                'Doubtful': 'Doubtful',
+                'Probable': 'Probable'
+            }
+            
+            # Iterar sobre partidos para encontrar equipos
+            for event in data.get('events', []):
+                for competition in event.get('competitions', []):
+                    for competitor in competition.get('competitors', []):
+                        team_id = competitor.get('id')
+                        team_name = competitor.get('team', {}).get('displayName')
+                        
+                        # Consultar roster específico del equipo para detalles de lesiones
+                        try:
+                            roster_url = f"https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team_id}/roster"
+                            roster_resp = requests.get(roster_url, timeout=5)
+                            roster_data = roster_resp.json()
+                            
+                            for athlete in roster_data.get('athletes', []):
+                                if athlete.get('injuries'):
+                                    # Tomar la lesión más reciente
+                                    injury = athlete['injuries'][0]
+                                    status = injury.get('status', 'Unknown')
+                                    mapped_status = status_map.get(status, status)
+                                    
+                                    # Normalizar nombre para coincidir con NBA API
+                                    # ESPN usa "LeBron James", NBA usa "LeBron James" (generalmente coinciden)
+                                    full_name = athlete.get('fullName')
+                                    
+                                    injured_players.append({
+                                        'PLAYER_NAME': full_name,
+                                        'TEAM_NAME': team_name,
+                                        'Current_Status': mapped_status,
+                                        'Comment': injury.get('details', {}).get('type', 'Injury')
+                                    })
+                                    
+                        except Exception as e:
+                            print(f"Error obteniendo roster de {team_name}: {e}")
+                            continue
             
             if injured_players:
-                return pd.DataFrame(injured_players)
+                df = pd.DataFrame(injured_players)
+                print(f"✅ {len(df)} jugadores lesionados encontrados.")
+                return df
             
             return pd.DataFrame()
             
         except Exception as e:
             print(f"Info: No se pudo obtener reporte de lesiones detallado: {e}")
-            print("Asumiendo que todos los jugadores están disponibles...")
             return pd.DataFrame()
     
     def get_player_season_stats(self, player_id: int) -> Dict:
@@ -225,17 +230,26 @@ class NBADataClient:
             if player_stats.empty:
                 return {}
             
+            # Si hay múltiples filas (traspasos), preferir TOT para las estadísticas
+            if len(player_stats) > 1:
+                tot_stats = player_stats[player_stats['TEAM_ABBREVIATION'] == 'TOT']
+                if not tot_stats.empty:
+                    player_stats = tot_stats
+
+            # Tomar la primera fila disponible
+            row = player_stats.iloc[0]
+            
             stats_dict = {
-                'player_name': player_stats['PLAYER_NAME'].values[0],
-                'team': player_stats['TEAM_ABBREVIATION'].values[0],
-                'gp': player_stats['GP'].values[0],
-                'pts': player_stats['PTS'].values[0],
-                'reb': player_stats['REB'].values[0],
-                'ast': player_stats['AST'].values[0],
-                'fg3m': player_stats['FG3M'].values[0],
-                'fg_pct': player_stats['FG_PCT'].values[0],
-                'fg3_pct': player_stats['FG3_PCT'].values[0],
-                'min': player_stats['MIN'].values[0]
+                'player_name': row['PLAYER_NAME'],
+                'team': row['TEAM_ABBREVIATION'],
+                'gp': row['GP'],
+                'pts': row['PTS'],
+                'reb': row['REB'],
+                'ast': row['AST'],
+                'fg3m': row['FG3M'],
+                'fg_pct': row['FG_PCT'],
+                'fg3_pct': row['FG3_PCT'],
+                'min': row['MIN']
             }
             
             # Guardar en cache
@@ -387,6 +401,7 @@ class NBADataClient:
     def get_active_players_for_game(self, home_team_id: int, away_team_id: int) -> Dict[str, List[int]]:
         """
         Obtiene los jugadores activos (no lesionados) de ambos equipos para un partido.
+        Usa el roster oficial actual y filtra por minutos y lesiones.
         
         Args:
             home_team_id: ID del equipo local
@@ -399,49 +414,71 @@ class NBADataClient:
             # Obtener reporte de lesiones
             injury_df = self.get_injury_report()
             
-            # Obtener todos los jugadores de ambos equipos
-            time.sleep(0.6)
-            home_stats = leaguedashplayerstats.LeagueDashPlayerStats(
-                season=self.current_season,
-                team_id_nullable=home_team_id
-            )
-            home_df = home_stats.get_data_frames()[0]
+            # Obtener estadísticas globales para filtrar por minutos (más robusto para traspasos)
+            # Aseguramos que all_stats esté cargado
+            all_stats = self._get_all_players_stats()
             
-            time.sleep(0.6)
-            away_stats = leaguedashplayerstats.LeagueDashPlayerStats(
-                season=self.current_season,
-                team_id_nullable=away_team_id
-            )
-            away_df = away_stats.get_data_frames()[0]
-            
-            # Filtrar jugadores OUT
-            injured_players = set()
-            if not injury_df.empty:
-                if 'Current_Status' in injury_df.columns:
-                    out_players = injury_df[injury_df['Current_Status'] == 'Out']
-                    if 'PLAYER_NAME' in out_players.columns:
-                        injured_players = set(out_players['PLAYER_NAME'].values)
-                elif 'PLAYER_NAME' in injury_df.columns:
-                    # Si no hay columna de estado, asumir que todos en la lista están out
-                    injured_players = set(injury_df['PLAYER_NAME'].values)
-            
-            # Filtrar jugadores activos (no lesionados y con minutos significativos)
-            home_active = home_df[
-                (~home_df['PLAYER_NAME'].isin(injured_players)) & 
-                (home_df['MIN'] > 10)  # Mínimo 10 minutos promedio (reducido de 15)
-            ]['PLAYER_ID'].tolist()
-            
-            away_active = away_df[
-                (~away_df['PLAYER_NAME'].isin(injured_players)) & 
-                (away_df['MIN'] > 10)
-            ]['PLAYER_ID'].tolist()
-            
-            # Si no hay jugadores activos, tomar los top jugadores por minutos
-            if not home_active:
-                home_active = home_df.nlargest(10, 'MIN')['PLAYER_ID'].tolist()
-            
-            if not away_active:
-                away_active = away_df.nlargest(10, 'MIN')['PLAYER_ID'].tolist()
+            def get_team_active_players(team_id):
+                try:
+                    time.sleep(0.6)
+                    # Obtener roster oficial actual
+                    roster = commonteamroster.CommonTeamRoster(
+                        team_id=team_id, 
+                        season=self.current_season
+                    )
+                    roster_df = roster.get_data_frames()[0]
+                    
+                    if roster_df.empty:
+                        return []
+                        
+                    active_ids = []
+                    injured_names = set()
+                    
+                    # Procesar lista de lesionados
+                    if not injury_df.empty:
+                        if 'Current_Status' in injury_df.columns:
+                            # Filtrar solo los que están definitivamente fuera
+                            out_players = injury_df[injury_df['Current_Status'].isin(['Out', 'Doubtful'])]
+                            if 'PLAYER_NAME' in out_players.columns:
+                                injured_names = set(out_players['PLAYER_NAME'].values)
+                        elif 'PLAYER_NAME' in injury_df.columns:
+                            injured_names = set(injury_df['PLAYER_NAME'].values)
+                    
+                    for _, player in roster_df.iterrows():
+                        p_id = player['PLAYER_ID']
+                        p_name = player['PLAYER']
+                        
+                        # Verificar lesión (coincidencia exacta o parcial)
+                        is_injured = False
+                        if p_name in injured_names:
+                            is_injured = True
+                        else:
+                            # Intento de coincidencia parcial (ej. "Luka Doncic" vs "L. Doncic")
+                            for inj_name in injured_names:
+                                if p_name in inj_name or inj_name in p_name:
+                                    is_injured = True
+                                    break
+                        
+                        if is_injured:
+                            continue
+                            
+                        # Verificar minutos (usando stats globales)
+                        p_stats = all_stats[all_stats['PLAYER_ID'] == p_id]
+                        
+                        if not p_stats.empty:
+                            # MIN en all_stats es PerGame
+                            avg_min = p_stats['MIN'].values[0]
+                            if avg_min > 10:
+                                active_ids.append(p_id)
+                        
+                    return active_ids
+                    
+                except Exception as e:
+                    print(f"Error procesando equipo {team_id}: {e}")
+                    return []
+
+            home_active = get_team_active_players(home_team_id)
+            away_active = get_team_active_players(away_team_id)
             
             return {
                 'home': home_active,

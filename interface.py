@@ -129,6 +129,21 @@ def analyze_game(game_id: str, date: str = None) -> Dict:
         return {}
 
 
+def get_player_gamelog(player_id: int) -> List[Dict]:
+    """Obtiene los últimos 5 partidos de un jugador."""
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/player/{player_id}",
+            params={'stat_type': 'gamelog', 'last_n': 5},
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception:
+        return []
+
+
 def get_confidence_class(confidence: float) -> str:
     """Retorna la clase CSS según el nivel de confianza."""
     if confidence >= 70:
@@ -437,10 +452,11 @@ def main():
                 st.success(f"✅ Análisis completado. Se encontraron {analysis['total_opportunities']} oportunidades de valor.")
                 
                 # Tabs para organizar información
-                tab1, tab2, tab3 = st.tabs([
+                tab1, tab2, tab3, tab4 = st.tabs([
                     "🎯 Mejores Apuestas",
                     "📊 Todas las Oportunidades",
-                    "🤖 Análisis Táctico"
+                    "🤖 Análisis Táctico",
+                    "🏥 Reporte de Lesiones"
                 ])
                 
                 with tab1:
@@ -494,6 +510,53 @@ def main():
                             file_name=f"nba_analysis_{selected_game['game_id']}.csv",
                             mime="text/csv"
                         )
+                        
+                        st.markdown("---")
+                        st.subheader("🔍 Detalle de Jugador (Últimos 5 Partidos)")
+                        
+                        # Selector de jugador para ver detalles
+                        # Crear opciones legibles
+                        player_options = {
+                            f"{row['player_name']} ({row['stat_type']}) - {row['bet_quality']}": row 
+                            for _, row in bets_df.iterrows()
+                        }
+                        
+                        selected_player_key = st.selectbox(
+                            "Selecciona una oportunidad para ver estadísticas recientes:",
+                            options=list(player_options.keys()),
+                            key="player_detail_selector"
+                        )
+                        
+                        if selected_player_key:
+                            selected_bet_detail = player_options[selected_player_key]
+                            player_id = selected_bet_detail.get('player_id')
+                            
+                            if player_id:
+                                with st.spinner(f"Cargando últimos juegos de {selected_bet_detail['player_name']}..."):
+                                    gamelog = get_player_gamelog(player_id)
+                                    
+                                    if gamelog:
+                                        gamelog_df = pd.DataFrame(gamelog)
+                                        
+                                        # Calcular PRA
+                                        if all(c in gamelog_df.columns for c in ['PTS', 'REB', 'AST']):
+                                            gamelog_df['PRA'] = gamelog_df['PTS'] + gamelog_df['REB'] + gamelog_df['AST']
+                                        
+                                        # Seleccionar columnas relevantes
+                                        cols_to_show = ['GAME_DATE', 'MATCHUP', 'WL', 'MIN', 'PRA', 'PTS', 'REB', 'AST', 'FG3M', 'FG_PCT']
+                                        # Filtrar solo las que existen
+                                        cols_to_show = [c for c in cols_to_show if c in gamelog_df.columns]
+                                        
+                                        st.dataframe(
+                                            gamelog_df[cols_to_show].style.format({
+                                                'FG_PCT': '{:.1%}'
+                                            }),
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        st.warning("No se encontraron datos recientes para este jugador.")
+                            else:
+                                st.error("No se pudo identificar el ID del jugador.")
                 
                 with tab3:
                     st.subheader("🤖 Análisis Táctico con IA")
@@ -503,6 +566,37 @@ def main():
                         gemini_analysis = generate_gemini_analysis(selected_game)
                     
                     st.markdown(gemini_analysis)
+                
+                with tab4:
+                    st.subheader("🏥 Reporte de Lesiones")
+                    
+                    injuries = analysis.get('injuries', [])
+                    if injuries:
+                        injuries_df = pd.DataFrame(injuries)
+                        
+                        # Renombrar columnas para mejor visualización
+                        injuries_df = injuries_df.rename(columns={
+                            'PLAYER_NAME': 'Jugador',
+                            'TEAM_NAME': 'Equipo',
+                            'Current_Status': 'Estado',
+                            'Comment': 'Detalle'
+                        })
+                        
+                        # Aplicar estilos condicionales
+                        def highlight_status(val):
+                            color = 'red' if val == 'Out' else 'orange' if val in ['Doubtful', 'Questionable'] else 'green'
+                            return f'color: {color}; font-weight: bold'
+
+                        st.dataframe(
+                            injuries_df.style.map(highlight_status, subset=['Estado']),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        st.info(f"ℹ️ Se encontraron {len(injuries)} jugadores en el reporte de lesiones para este partido.")
+                    else:
+                        st.success("✅ No se reportan lesiones significativas para los equipos de este partido.")
+
                     
                     # Estadísticas del partido
                     st.markdown("---")
@@ -541,7 +635,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #666; padding: 1rem;">
-        <p>🏀 NBA Betting Analyzer Pro v1.0</p>
+        <p>🏀 NBA Betting Analyzer Pro v2.0</p>
         <p>Desarrollado con FastAPI + Streamlit + NBA API</p>
         <p style="font-size: 0.8rem;">⚠️ Disclaimer: Este sistema es solo para fines educativos. 
         Las apuestas deportivas conllevan riesgos. Apuesta responsablemente.</p>

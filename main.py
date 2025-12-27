@@ -175,6 +175,23 @@ async def analyze_game(game_id: str, date: str = None):
             game_date_utc=target_game.get('game_time')
         )
         
+        # Obtener lesiones para este partido
+        game_injuries = []
+        try:
+            injury_df = nba_client.get_injury_report()
+            if not injury_df.empty:
+                home_team = target_game['home_team']
+                away_team = target_game['away_team']
+                
+                # Filtrar por nombre de equipo (contiene nickname)
+                relevant_injuries = injury_df[
+                    injury_df['TEAM_NAME'].str.contains(home_team, case=False, na=False) | 
+                    injury_df['TEAM_NAME'].str.contains(away_team, case=False, na=False)
+                ]
+                game_injuries = relevant_injuries.to_dict('records')
+        except Exception as e:
+            print(f"Error obteniendo lesiones para respuesta: {e}")
+        
         analysis = {
             "game_id": game_id,
             "home_team": target_game['home_team'],
@@ -182,6 +199,7 @@ async def analyze_game(game_id: str, date: str = None):
             "game_time": target_game['game_time'],
             "best_bets": best_bets,
             "total_opportunities": len(best_bets),
+            "injuries": game_injuries,
             "analysis_timestamp": datetime.now().isoformat(),
             "top_3_summary": best_bets[:3] if len(best_bets) >= 3 else best_bets
         }
@@ -198,13 +216,14 @@ async def analyze_game(game_id: str, date: str = None):
 
 
 @app.get("/api/player/{player_id}")
-async def get_player_stats(player_id: int, stat_type: str = "season"):
+async def get_player_stats(player_id: int, stat_type: str = "season", last_n: int = 5):
     """
     Obtiene estadísticas detalladas de un jugador específico.
     
     Args:
         player_id: ID único del jugador
-        stat_type: Tipo de estadísticas ('season', 'last5', 'last10')
+        stat_type: Tipo de estadísticas ('season', 'last5', 'last10', 'gamelog')
+        last_n: Número de juegos para gamelog (default 5)
         
     Returns:
         Estadísticas del jugador según el tipo solicitado
@@ -212,6 +231,15 @@ async def get_player_stats(player_id: int, stat_type: str = "season"):
     try:
         if stat_type == "season":
             stats = nba_client.get_player_season_stats(player_id)
+        elif stat_type == "gamelog":
+            games = nba_client.get_player_recent_games(player_id, last_n=last_n)
+            if games.empty:
+                return []
+            
+            # Convertir a lista de diccionarios y limpiar NaNs
+            games_dict = games.fillna(0).to_dict('records')
+            return games_dict
+            
         elif stat_type in ["last5", "last10"]:
             n = 5 if stat_type == "last5" else 10
             games = nba_client.get_player_recent_games(player_id, last_n=n)
@@ -230,7 +258,7 @@ async def get_player_stats(player_id: int, stat_type: str = "season"):
         else:
             raise HTTPException(
                 status_code=400,
-                detail="stat_type debe ser 'season', 'last5' o 'last10'"
+                detail="stat_type debe ser 'season', 'last5', 'last10' o 'gamelog'"
             )
         
         return stats

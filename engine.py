@@ -196,6 +196,7 @@ class NBAPredictionEngine:
             trending_up = pra_last5 > pra_season * 1.05  # 5% mejor que promedio
             
             return {
+                'player_id': player_id,
                 'player_name': season_stats['player_name'],
                 'team': season_stats['team'],
                 'stat_type': 'PRA',
@@ -253,6 +254,7 @@ class NBAPredictionEngine:
             trending_up = last5_pts > season_pts * 1.05
             
             return {
+                'player_id': player_id,
                 'player_name': season_stats['player_name'],
                 'team': season_stats['team'],
                 'stat_type': 'PTS',
@@ -299,6 +301,7 @@ class NBAPredictionEngine:
             trending_up = last5_fg3m > season_fg3m * 1.05
             
             return {
+                'player_id': player_id,
                 'player_name': season_stats['player_name'],
                 'team': season_stats['team'],
                 'stat_type': 'FG3M',
@@ -344,6 +347,7 @@ class NBAPredictionEngine:
             trending_up = last5_reb > season_reb * 1.05
             
             return {
+                'player_id': player_id,
                 'player_name': season_stats['player_name'],
                 'team': season_stats['team'],
                 'stat_type': 'REB',
@@ -389,6 +393,7 @@ class NBAPredictionEngine:
             trending_up = last5_ast > season_ast * 1.05
             
             return {
+                'player_id': player_id,
                 'player_name': season_stats['player_name'],
                 'team': season_stats['team'],
                 'stat_type': 'AST',
@@ -500,6 +505,7 @@ class NBAPredictionEngine:
         final_rating = (our_projection / min_value) * 30 + (confidence / 100) * 70
         
         return {
+            'player_id': projection.get('player_id', 0),
             'player_name': projection.get('player_name', 'Unknown'),
             'team': projection.get('team', 'N/A'),
             'stat_type': stat_type,
