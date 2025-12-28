@@ -4,7 +4,7 @@ Módulo para conexión con la API de NBA y obtención de datos en tiempo real.
 Maneja la sincronización diaria de partidos, estadísticas de jugadores y reportes de lesiones.
 """
 
-from nba_api.live.nba.endpoints import scoreboard
+from nba_api.live.nba.endpoints import scoreboard, boxscore
 from nba_api.stats.endpoints import (
     leaguegamefinder, playergamelogs, commonplayerinfo,
     leaguedashplayerstats, teamgamelogs, scoreboardv2, commonteamroster
@@ -489,3 +489,52 @@ class NBADataClient:
             print(f"Error obteniendo jugadores activos: {e}")
             print("Retornando listas vacías - se reintentará...")
             return {'home': [], 'away': []}
+
+    def get_live_game_stats(self, game_id: str) -> Dict:
+        """
+        Obtiene estadísticas en tiempo real de un partido en curso.
+        
+        Args:
+            game_id: ID del partido
+            
+        Returns:
+            Diccionario con estadísticas de jugadores en tiempo real
+        """
+        try:
+            # Usar el endpoint live boxscore
+            box = boxscore.BoxScore(game_id=game_id)
+            data = box.get_dict()
+            
+            live_stats = {}
+            
+            if 'game' in data:
+                game_data = data['game']
+                
+                # Función auxiliar para procesar jugadores de un equipo
+                def process_team_players(team_data):
+                    team_code = team_data.get('teamTricode', '')
+                    for player in team_data.get('players', []):
+                        stats = player.get('statistics', {})
+                        live_stats[player['personId']] = {
+                            'name': player.get('name', 'Unknown'),
+                            'team': team_code,
+                            'pts': stats.get('points', 0),
+                            'reb': stats.get('reboundsTotal', 0),
+                            'ast': stats.get('assists', 0),
+                            'fg3m': stats.get('threePointersMade', 0),
+                            'stl': stats.get('steals', 0),
+                            'blk': stats.get('blocks', 0),
+                            'min': stats.get('minutes', '00:00')
+                        }
+
+                if 'homeTeam' in game_data:
+                    process_team_players(game_data['homeTeam'])
+                
+                if 'awayTeam' in game_data:
+                    process_team_players(game_data['awayTeam'])
+                    
+            return live_stats
+            
+        except Exception as e:
+            print(f"Error obteniendo stats en vivo para {game_id}: {e}")
+            return {}

@@ -1,306 +1,111 @@
 # 🏀 NBA Betting Analyzer Pro
 
-Sistema completo de análisis y predicción de apuestas NBA en tiempo real. Utiliza datos oficiales de la NBA para generar proyecciones estadísticas avanzadas y detectar oportunidades de valor en el mercado de apuestas.
-
-## 🎯 Características Principales
-
-### ✅ Sincronización Automática de Datos
-- Detección automática de partidos del día usando fecha actual
-- Filtro en tiempo real de jugadores lesionados (OUT)
-- Carga de estadísticas de temporada y tendencias recientes
-
-### 📊 Motor de Predicción Avanzado
-- **Cálculo de Mercados**: PRA, Puntos, Rebotes, Asistencias, Triples
-- **Algoritmo de Ventaja (Edge)**: Compara proyecciones vs líneas de mercado
-- **Ajuste por Rival**: Factoriza el Defensive Rating del oponente
-- **Detección de Back-to-Back**: Penalización por fatiga (-8%)
-- **Análisis de Tendencias**: Últimos 5 y 10 juegos con pesos específicos
-
-### 🎨 Interfaz Interactiva
-- Selector visual de partidos
-- Ranking de mejores apuestas por confianza
-- Tablas detalladas con estadísticas de jugadores
-- Exportación de análisis a CSV
-- Integración preparada para análisis con Gemini AI
-
-## 🚀 Instalación
-
-### Requisitos Previos
-- Python 3.8+
-- pip (gestor de paquetes)
-
-### Pasos de Instalación
-
-1. **Clonar o descargar el proyecto**
-```bash
-cd nba-betting-analyzer
-```
-
-2. **Crear entorno virtual (recomendado)**
-```bash
-python -m venv venv
-
-# Activar en Windows
-venv\Scripts\activate
-
-# Activar en Mac/Linux
-source venv/bin/activate
-```
-
-3. **Instalar dependencias**
-```bash
-pip install -r requirements.txt
-```
-
-## 📖 Estructura del Proyecto
-
-```
-nba-betting-analyzer/
-│
-├── api_client.py       # Cliente para NBA API (obtención de datos)
-├── engine.py           # Motor de cálculo y predicciones
-├── main.py             # Backend FastAPI (REST API)
-├── interface.py        # Frontend Streamlit (UI interactiva)
-├── requirements.txt    # Dependencias del proyecto
-└── README.md          # Este archivo
-```
-
-## 🎮 Uso del Sistema
-
-### Paso 1: Iniciar el Backend (FastAPI)
-
-Abrir una terminal y ejecutar:
-
-```bash
-python main.py
-```
-
-O alternativamente:
-
-```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-El servidor estará disponible en:
-- API: `http://localhost:8000`
-- Documentación interactiva: `http://localhost:8000/docs`
-
-### Paso 2: Iniciar el Frontend (Streamlit)
-
-Abrir una **segunda terminal** y ejecutar:
-
-```bash
-streamlit run interface.py
-```
-
-La interfaz se abrirá automáticamente en tu navegador en:
-- URL: `http://localhost:8501`
-
-### Paso 3: Usar la Aplicación
-
-1. **Ver partidos del día**: La aplicación carga automáticamente todos los partidos programados
-2. **Seleccionar partido**: Usa el selector desplegable para elegir el encuentro a analizar
-3. **Generar análisis**: Haz clic en "Analizar Partido"
-4. **Explorar resultados**:
-   - Pestaña "Mejores Apuestas": Top 5 oportunidades con mayor valor
-   - Pestaña "Todas las Oportunidades": Tabla completa con filtros
-   - Pestaña "Análisis Táctico": Insights del partido con IA
-
-## 🧮 Cómo Funciona el Algoritmo
-
-### 1. Recopilación de Datos
-```python
-# Para cada jugador activo (no lesionado):
-- Estadísticas de temporada (promedio)
-- Últimos 5 juegos (tendencia corto plazo)
-- Últimos 10 juegos (tendencia medio plazo)
-- Verificación de back-to-back
-```
-
-### 2. Cálculo de Proyección Base
-```python
-proyección = (temporada * 0.30) + (últimos_10 * 0.35) + (últimos_5 * 0.35)
-
-# Si es back-to-back:
-proyección *= 0.92  # Penalización del 8% por fatiga
-```
-
-### 3. Ajuste por Oponente
-```python
-factor_defensa = stats_permitidos_rival / promedio_liga
-
-proyección_ajustada = proyección_base * factor_defensa
-```
-
-### 4. Cálculo de Ventaja (Edge)
-```python
-diferencia = nuestra_proyección - línea_mercado
-edge_porcentaje = (diferencia / línea_mercado) * 100
-
-# Si edge > 15%: Apuesta de VALOR
-if edge > 15:
-    recomendación = "OVER" o "UNDER"
-else:
-    recomendación = "NO BET"
-```
-
-### 5. Score de Confianza
-```python
-# Basado en consistencia (coeficiente de variación)
-cv = desviación_estándar / media
-confianza = 100 - cv
-
-# Rating final combina edge y confianza:
-rating_final = (edge * 0.6) + (confianza * 0.4)
-```
-
-## 📊 Endpoints de la API
-
-### GET `/api/games/today`
-Obtiene todos los partidos del día.
-
-**Respuesta:**
-```json
-[
-  {
-    "game_id": "0022400123",
-    "home_team": "Lakers",
-    "away_team": "Celtics",
-    "game_time": "2024-12-21T19:30:00",
-    "home_team_id": 1610612747,
-    "away_team_id": 1610612738
-  }
-]
-```
-
-### GET `/api/analysis/{game_id}`
-Analiza un partido específico y genera sugerencias.
-
-**Respuesta:**
-```json
-{
-  "game_id": "0022400123",
-  "home_team": "Lakers",
-  "away_team": "Celtics",
-  "best_bets": [
-    {
-      "player_name": "LeBron James",
-      "stat_type": "PRA",
-      "our_projection": 47.5,
-      "betting_line": 42.5,
-      "edge_percentage": 11.76,
-      "recommended_bet": "OVER",
-      "confidence": 78.3,
-      "final_rating": 82.5
-    }
-  ],
-  "total_opportunities": 8
-}
-```
-
-### GET `/api/player/{player_id}`
-Obtiene estadísticas de un jugador.
-
-**Parámetros:**
-- `player_id`: ID del jugador
-- `stat_type`: `season`, `last5`, o `last10`
-
-## 🔧 Configuración Avanzada
-
-### Integración con Gemini AI (Opcional)
-
-Para habilitar análisis táctico real con IA, editar `interface.py`:
-
-```python
-def generate_gemini_analysis(game_data: Dict) -> str:
-    import google.generativeai as genai
-    
-    genai.configure(api_key="TU_API_KEY_AQUI")
-    model = genai.GenerativeModel('gemini-pro')
-    
-    prompt = f"""
-    Analiza tácticamente el partido {game_data['away_team']} vs {game_data['home_team']}.
-    Considera matchups, ritmo de juego y tendencias recientes.
-    """
-    
-    response = model.generate_content(prompt)
-    return response.text
-```
-
-### Conectar con API de Odds Real
-
-El sistema actualmente simula líneas de apuestas. Para datos reales:
-
-```python
-# En engine.py, método find_value_bets():
-import requests
-
-def get_real_betting_line(player_name: str, stat_type: str) -> float:
-    # Ejemplo con The Odds API
-    response = requests.get(
-        "https://api.the-odds-api.com/v4/sports/basketball_nba/odds",
-        params={"apiKey": "ea45c48e13e790058f7b49f25385bb7b"}
-    )
-    # Parsear y retornar línea específica
-    pass
-```
-
-## ⚠️ Limitaciones y Consideraciones
-
-1. **Rate Limiting**: La NBA API tiene límites de requests (~600 por minuto)
-2. **Datos en Vivo**: Algunos datos solo están disponibles cerca del juego
-3. **Líneas Simuladas**: Las líneas de apuestas son estimaciones (conectar API real)
-4. **Uso Responsable**: Este sistema es educativo. Apuesta con responsabilidad.
-
-## 🐛 Solución de Problemas
-
-### Error: "No se puede conectar con el backend"
-```bash
-# Verificar que FastAPI esté corriendo:
-curl http://localhost:8000/health
-
-# Si no responde, reiniciar:
-python main.py
-```
-
-### Error: "ModuleNotFoundError"
-```bash
-# Reinstalar dependencias:
-pip install -r requirements.txt --force-reinstall
-```
-
-### Error: "NBA API timeout"
-```bash
-# Aumentar timeout en api_client.py:
-response = requests.get(url, timeout=60)  # De 30 a 60 segundos
-```
-
-## 📈 Próximas Mejoras
-
-- [ ] Integración real con APIs de odds (The Odds API, Pinnacle)
-- [ ] Soporte para más mercados (Dobles-Dobles, Triple-Dobles)
-- [ ] Base de datos histórica para backtesting
-- [ ] Sistema de notificaciones en tiempo real
-- [ ] Dashboard con gráficos de rendimiento
-- [ ] Machine Learning para mejorar proyecciones
-
-## 📄 Licencia
-
-Este proyecto es de código abierto bajo licencia MIT. Úsalo libremente para fines educativos.
-
-## 🤝 Contribuciones
-
-Las contribuciones son bienvenidas. Por favor:
-1. Fork del proyecto
-2. Crear rama de feature (`git checkout -b feature/nueva-funcionalidad`)
-3. Commit de cambios (`git commit -am 'Añadir nueva funcionalidad'`)
-4. Push a la rama (`git push origin feature/nueva-funcionalidad`)
-5. Crear Pull Request
-
-## 📞 Soporte
-
-Para preguntas o problemas, abrir un issue en el repositorio del proyecto.
+**NBA Betting Analyzer Pro** es una herramienta avanzada de análisis deportivo diseñada para identificar oportunidades de valor en el mercado de apuestas de la NBA. Utilizando datos en tiempo real, algoritmos de proyección estadística e inteligencia artificial, el sistema ofrece recomendaciones fundamentadas para Puntos, Rebotes, Asistencias y Triples.
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104%2B-green)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-red)
+![NBA API](https://img.shields.io/badge/NBA_API-Live-orange)
 
 ---
 
-**Desarrollado con ❤️ para la comunidad NBA**
+## 🚀 Funcionalidades Principales
+
+### 1. 📊 Análisis Estadístico Avanzado
+El núcleo del sistema es un motor de proyección que calcula el rendimiento esperado de cada jugador basándose en múltiples factores temporales y contextuales.
+
+### 2. 🔴 Live Tracker (Seguimiento en Vivo)
+Nueva funcionalidad que permite monitorear en tiempo real el progreso de tus apuestas sugeridas mientras se juega el partido.
+- **Actualización automática:** Se conecta al *live boxscore* de la NBA.
+- **Visualización intuitiva:** Barras de progreso para cada apuesta (OVER/UNDER).
+- **Soporte PRA:** Cálculo automático de Puntos + Rebotes + Asistencias en tiempo real.
+- **Alertas visuales:** Indicadores claros cuando una línea se cubre o se pierde.
+
+### 3. 🏥 Reporte de Lesiones Integrado
+Consulta automática de fuentes externas (ESPN) para filtrar jugadores lesionados o cuestionables, evitando recomendaciones sobre jugadores que no participarán.
+
+### 4. 🤖 Análisis Táctico con IA
+Integración con **Google Gemini** para generar análisis cualitativos sobre los enfrentamientos, claves del partido y factores intangibles que los números no capturan.
+
+### 5. 📉 Detección de Tendencias y Fatiga
+- **Back-to-Back:** Identifica equipos que jugaron el día anterior y aplica penalizaciones por fatiga.
+- **Hot Streaks:** Detecta jugadores con tendencia al alza en sus últimos 5 partidos.
+
+---
+
+## 🧮 Cómo Funciona el Motor de Predicción
+
+El sistema utiliza un enfoque ponderado para calcular las proyecciones, priorizando el rendimiento reciente sobre el promedio de la temporada.
+
+### 1. Cálculo de Proyecciones
+La proyección base se calcula mediante un promedio ponderado:
+- **35%** - Promedio de los últimos **5 partidos** (Forma actual).
+- **35%** - Promedio de los últimos **10 partidos** (Tendencia a medio plazo).
+- **30%** - Promedio de la **temporada** (Consistencia a largo plazo).
+
+*Ajustes adicionales:*
+- **Factor de Fatiga:** Si el equipo está en *back-to-back* (jugó ayer), se aplica una penalización del **-8%** a la proyección.
+
+### 2. Línea Sugerida
+El sistema calcula una línea de seguridad para las apuestas *OVER*:
+- **Línea Sugerida = Proyección × 0.95**
+- Esto crea un margen de seguridad del 5% para aumentar la probabilidad de éxito.
+
+### 3. Nivel de Confianza (%)
+La confianza no es subjetiva, sino matemática. Se basa en la **Consistencia** del jugador:
+- Se calcula el *Coeficiente de Variación* (Desviación Estándar / Media) de los últimos juegos.
+- **Menor variación = Mayor consistencia = Mayor Confianza.**
+- Escala de 0 a 100%. Una confianza >60% se considera alta.
+
+### 4. Rating Final (0-100)
+Es la métrica definitiva para ordenar las mejores apuestas. Combina el valor de la proyección con la seguridad de la confianza:
+- **70% del peso:** Nivel de Confianza (Seguridad).
+- **30% del peso:** Magnitud de la Proyección (Valor).
+
+### 5. Calidad de la Apuesta
+El sistema etiqueta las oportunidades automáticamente:
+- **💎 EXCELENTE:** Confianza alta (>60%) + Tendencia al alza (Últimos 5 > Temporada).
+- **✅ BUENA:** Confianza alta o Proyección muy superior a la línea.
+- **⚠️ ARRIESGADA:** Proyección positiva pero baja consistencia.
+
+---
+
+## 🛠️ Stack Tecnológico y APIs
+
+El proyecto está construido con una arquitectura moderna de microservicios:
+
+- **Backend:** `FastAPI` - Manejo de lógica de negocio y endpoints REST.
+- **Frontend:** `Streamlit` - Interfaz de usuario interactiva y visualización de datos.
+- **Datos:**
+  - `nba_api`: Fuente oficial de estadísticas, calendarios y boxscores en vivo.
+  - `requests`: Scraping de reportes de lesiones (ESPN).
+- **IA:** `google-generativeai`: Generación de análisis tácticos con modelos Gemini.
+- **Ciencia de Datos:** `pandas` y `numpy` para manipulación y cálculo vectorial.
+
+---
+
+## 📦 Instalación y Uso
+
+1. **Clonar el repositorio**
+2. **Instalar dependencias:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **Configurar variables de entorno:**
+   Crear un archivo `.env` con tu API Key de Google Gemini:
+   ```
+   GOOGLE_API_KEY=tu_api_key_aqui
+   ```
+4. **Iniciar el Backend:**
+   ```bash
+   uvicorn main:app --reload
+   ```
+5. **Iniciar el Frontend (en otra terminal):**
+   ```bash
+   streamlit run interface.py
+   ```
+
+---
+
+## ⚠️ Disclaimer
+*Esta herramienta es solo para fines educativos y de entretenimiento. Las apuestas deportivas conllevan riesgos financieros. El autor no se hace responsable de pérdidas económicas derivadas del uso de este software. Apuesta siempre con responsabilidad.*

@@ -129,6 +129,20 @@ def analyze_game(game_id: str, date: str = None) -> Dict:
         return {}
 
 
+def get_live_game_stats(game_id: str) -> Dict:
+    """Obtiene estadísticas en tiempo real de un partido."""
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/live/game/{game_id}",
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {}
+    except Exception:
+        return {}
+
+
 def get_player_gamelog(player_id: int) -> List[Dict]:
     """Obtiene los últimos 5 partidos de un jugador."""
     try:
@@ -452,11 +466,12 @@ def main():
                 st.success(f"✅ Análisis completado. Se encontraron {analysis['total_opportunities']} oportunidades de valor.")
                 
                 # Tabs para organizar información
-                tab1, tab2, tab3, tab4 = st.tabs([
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
                     "🎯 Mejores Apuestas",
                     "📊 Todas las Oportunidades",
                     "🤖 Análisis Táctico",
-                    "🏥 Reporte de Lesiones"
+                    "🏥 Reporte de Lesiones",
+                    "🔴 Live Tracker"
                 ])
                 
                 with tab1:
@@ -626,6 +641,105 @@ def main():
                         st.markdown('<div class="stat-box">', unsafe_allow_html=True)
                         st.metric("Apuestas Alta Confianza", high_value)
                         st.markdown('</div>', unsafe_allow_html=True)
+
+                with tab5:
+                    st.subheader("🔴 Seguimiento en Vivo")
+                    
+                    col_refresh, _ = st.columns([1, 4])
+                    with col_refresh:
+                        if st.button("🔄 Actualizar Stats", key="refresh_live"):
+                            st.rerun()
+                        
+                    live_stats = get_live_game_stats(selected_game['game_id'])
+                    
+                    if not live_stats:
+                        st.info("El partido no ha comenzado o no hay datos disponibles aún.")
+                    else:
+                        st.markdown("#### 📊 Progreso de Oportunidades Detectadas")
+                        
+                        if not analysis.get('best_bets'):
+                            st.info("No hay apuestas sugeridas para rastrear.")
+                        else:
+                            # Iterar sobre todas las apuestas sugeridas
+                            for idx, bet in enumerate(analysis['best_bets']):
+                                player_name = bet['player_name']
+                                stat_type = bet['stat_type'].upper()
+                                target_line = bet['suggested_line']
+                                # Determinar tipo de apuesta (asumimos OVER si la proyección es mayor a la línea)
+                                # En la estructura actual no tenemos explícitamente 'recommended_bet' en todos los casos,
+                                # pero podemos inferirlo o usar 'recommended_bet' si existe.
+                                bet_type = bet.get('recommended_bet', 'OVER')
+                                if 'recommended_bet' not in bet:
+                                    # Inferencia simple
+                                    bet_type = 'OVER' if bet['projection'] > bet['suggested_line'] else 'UNDER'
+
+                                # Buscar stats del jugador en vivo
+                                player_live_data = None
+                                for pid, pdata in live_stats.items():
+                                    # Comparación flexible de nombres
+                                    if pdata['name'] == player_name or player_name in pdata['name'] or pdata['name'] in player_name:
+                                        player_live_data = pdata
+                                        break
+                                
+                                # Redondear línea para visualización (Enteros)
+                                display_line = int(round(target_line))
+
+                                # Contenedor para la tarjeta
+                                with st.container():
+                                    col_info, col_viz = st.columns([2, 3])
+                                    
+                                    with col_info:
+                                        st.markdown(f"**{player_name}**")
+                                        st.caption(f"{stat_type} - Línea: {display_line} ({bet_type})")
+                                        
+                                        if player_live_data:
+                                            # Calcular valor actual (Soporte para PRA)
+                                            if stat_type == 'PRA':
+                                                current_val = (player_live_data.get('pts', 0) + 
+                                                             player_live_data.get('reb', 0) + 
+                                                             player_live_data.get('ast', 0))
+                                            else:
+                                                current_val = player_live_data.get(stat_type.lower(), 0)
+                                                
+                                            st.metric("Actual", current_val, delta=f"{current_val - display_line}")
+                                        else:
+                                            st.warning("Sin datos")
+
+                                    with col_viz:
+                                        if player_live_data:
+                                            # Recalcular current_val para asegurar disponibilidad
+                                            if stat_type == 'PRA':
+                                                current_val = (player_live_data.get('pts', 0) + 
+                                                             player_live_data.get('reb', 0) + 
+                                                             player_live_data.get('ast', 0))
+                                            else:
+                                                current_val = player_live_data.get(stat_type.lower(), 0)
+                                            
+                                            if bet_type == 'OVER':
+                                                # Barra de progreso para OVER
+                                                progress = min(current_val / display_line if display_line > 0 else 0, 1.0)
+                                                st.progress(progress)
+                                                
+                                                if current_val >= display_line:
+                                                    st.success(f"✅ ¡CUBIERTA! ({current_val})")
+                                                else:
+                                                    diff = display_line - current_val
+                                                    st.caption(f"Faltan {diff} para cubrir")
+                                            
+                                            else: # UNDER
+                                                # Barra de "Peligro" para UNDER
+                                                risk = min(current_val / display_line if display_line > 0 else 0, 1.0)
+                                                st.progress(risk)
+                                                
+                                                if current_val > display_line:
+                                                    st.error(f"❌ PERDIDA ({current_val})")
+                                                else:
+                                                    cushion = display_line - current_val
+                                                    st.success(f"✅ En juego (Margen: {cushion})")
+                                        else:
+                                            st.info("⏳ Esperando que ingrese al partido...")
+                                    
+                                    st.markdown("---")
             
             else:
                 st.warning("No se encontraron oportunidades de valor significativas para este partido.")

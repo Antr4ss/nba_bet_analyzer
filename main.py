@@ -136,6 +136,21 @@ async def get_todays_games(date: str = None):
         )
 
 
+@app.get("/api/live/game/{game_id}")
+async def get_live_game_stats(game_id: str):
+    """
+    Obtiene estadísticas en tiempo real de un partido.
+    """
+    try:
+        stats = nba_client.get_live_game_stats(game_id)
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo stats en vivo: {str(e)}"
+        )
+
+
 @app.get("/api/analysis/{game_id}")
 async def analyze_game(game_id: str, date: str = None):
     """
