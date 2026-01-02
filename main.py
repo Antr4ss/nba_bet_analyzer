@@ -231,7 +231,7 @@ async def analyze_game(game_id: str, date: str = None):
 
 
 @app.get("/api/player/{player_id}")
-async def get_player_stats(player_id: int, stat_type: str = "season", last_n: int = 5):
+async def get_player_stats(player_id: int, stat_type: str = "season", last_n: int = 10):
     """
     Obtiene estadísticas detalladas de un jugador específico.
     

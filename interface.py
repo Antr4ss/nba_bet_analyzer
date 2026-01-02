@@ -148,7 +148,7 @@ def get_player_gamelog(player_id: int) -> List[Dict]:
     try:
         response = requests.get(
             f"{BACKEND_URL}/api/player/{player_id}",
-            params={'stat_type': 'gamelog', 'last_n': 5},
+            params={'stat_type': 'gamelog', 'last_n': 10},
             timeout=10
         )
         if response.status_code == 200:

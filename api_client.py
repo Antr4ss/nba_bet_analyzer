@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import time
 import requests
+import unicodedata
 from typing import Dict, List, Optional
 
 
@@ -42,6 +43,15 @@ class NBADataClient:
         self._recent_games_cache = {}
         self._defense_cache = {}
         
+    def _normalize_name(self, name: str) -> str:
+        """Normaliza un nombre eliminando acentos y caracteres especiales."""
+        if not isinstance(name, str):
+            return ""
+        # Normalizar unicode (NFD separa caracteres de sus acentos)
+        nfkd_form = unicodedata.normalize('NFKD', name)
+        # Filtrar caracteres no ASCII y convertir a minúsculas
+        return "".join([c for c in nfkd_form if not unicodedata.combining(c)]).lower().strip()
+
     def _get_all_players_stats(self) -> pd.DataFrame:
         """
         Obtiene estadísticas de TODOS los jugadores de una vez.
@@ -181,11 +191,16 @@ class NBADataClient:
                                     # ESPN usa "LeBron James", NBA usa "LeBron James" (generalmente coinciden)
                                     full_name = athlete.get('fullName')
                                     
+                                    # ID del jugador de ESPN (para obtener foto)
+                                    espn_id = athlete.get('id')
+                                    
                                     injured_players.append({
                                         'PLAYER_NAME': full_name,
                                         'TEAM_NAME': team_name,
                                         'Current_Status': mapped_status,
-                                        'Comment': injury.get('details', {}).get('type', 'Injury')
+                                        'Comment': injury.get('details', {}).get('type', 'Injury'),
+                                        'ESPN_ID': espn_id,
+                                        'HEADSHOT': athlete.get('headshot', {}).get('href', '')
                                     })
                                     
                         except Exception as e:
@@ -432,7 +447,7 @@ class NBADataClient:
                         return []
                         
                     active_ids = []
-                    injured_names = set()
+                    normalized_injured_names = set()
                     
                     # Procesar lista de lesionados
                     if not injury_df.empty:
@@ -440,22 +455,26 @@ class NBADataClient:
                             # Filtrar solo los que están definitivamente fuera
                             out_players = injury_df[injury_df['Current_Status'].isin(['Out', 'Doubtful'])]
                             if 'PLAYER_NAME' in out_players.columns:
-                                injured_names = set(out_players['PLAYER_NAME'].values)
+                                for name in out_players['PLAYER_NAME'].values:
+                                    normalized_injured_names.add(self._normalize_name(name))
                         elif 'PLAYER_NAME' in injury_df.columns:
-                            injured_names = set(injury_df['PLAYER_NAME'].values)
+                            for name in injury_df['PLAYER_NAME'].values:
+                                normalized_injured_names.add(self._normalize_name(name))
                     
                     for _, player in roster_df.iterrows():
                         p_id = player['PLAYER_ID']
                         p_name = player['PLAYER']
+                        p_name_norm = self._normalize_name(p_name)
                         
                         # Verificar lesión (coincidencia exacta o parcial)
                         is_injured = False
-                        if p_name in injured_names:
+                        if p_name_norm in normalized_injured_names:
                             is_injured = True
                         else:
                             # Intento de coincidencia parcial (ej. "Luka Doncic" vs "L. Doncic")
-                            for inj_name in injured_names:
-                                if p_name in inj_name or inj_name in p_name:
+                            for inj_name_norm in normalized_injured_names:
+                                # Verificar que la coincidencia sea significativa (más de 4 caracteres para evitar falsos positivos cortos)
+                                if len(inj_name_norm) > 4 and (p_name_norm in inj_name_norm or inj_name_norm in p_name_norm):
                                     is_injured = True
                                     break
                         
