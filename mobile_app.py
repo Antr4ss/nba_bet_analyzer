@@ -19,7 +19,8 @@ load_dotenv()
 # Para emulador Android usa: "http://10.0.2.2:8000"
 # Para dispositivo físico usa la IP de tu PC: "http://192.168.x.x:8000"
 # Para desarrollo en PC usa: "http://localhost:8000"
-API_URL = "http://localhost:8000"
+#API_URL = "http://localhost:8000"
+API_URL = " https://mixible-unbumptiously-alexia.ngrok-free.dev"
 
 # Colores NBA
 NBA_BLUE = "#17408B"
