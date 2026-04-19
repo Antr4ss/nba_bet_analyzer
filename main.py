@@ -370,6 +370,298 @@ async def custom_player_analysis(
             status_code=500,
             detail=f"Error en análisis personalizado: {str(e)}"
         )
+        
+        
+@app.get("/api/team/{team_id}/stats")
+async def get_team_stats(team_id: int):
+    """
+    Obtiene estadísticas generales del equipo para la temporada actual.
+    
+    Args:
+        team_id: ID del equipo NBA
+        
+    Returns:
+        Estadísticas ofensivas, defensivas y generales del equipo
+    """
+    try:
+        from nba_api.stats.endpoints import leaguedashteamstats
+        import time
+        
+        time.sleep(0.6)
+        
+        stats = leaguedashteamstats.LeagueDashTeamStats(
+            season=nba_client.current_season,
+            per_mode_detailed='PerGame'
+        )
+        
+        df = stats.get_data_frames()[0]
+        team_stats = df[df['TEAM_ID'] == team_id]
+        
+        if team_stats.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Equipo {team_id} no encontrado"
+            )
+        
+        row = team_stats.iloc[0]
+        
+        return {
+            "team_id": team_id,
+            "team_name": row.get('TEAM_NAME', 'Unknown'),
+            "wins": int(row.get('W', 0)),
+            "losses": int(row.get('L', 0)),
+            "win_pct": round(float(row.get('W_PCT', 0)), 3),
+            "pts_per_game": round(float(row.get('PTS', 0)), 1),
+            "reb_per_game": round(float(row.get('REB', 0)), 1),
+            "ast_per_game": round(float(row.get('AST', 0)), 1),
+            "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
+            "fg3_pct": round(float(row.get('FG3_PCT', 0)), 3),
+            "pts_allowed": round(float(row.get('PTS', 0)), 1),  # Aprox, requeriría endpoint defensivo
+            "season": nba_client.current_season
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo estadísticas del equipo: {str(e)}"
+        )
+ 
+ 
+@app.get("/api/team/{team_id}/recent-games")
+async def get_team_recent_games(team_id: int, last_n: int = 5):
+    """
+    Obtiene los últimos N partidos de un equipo.
+    
+    Args:
+        team_id: ID del equipo NBA
+        last_n: Número de partidos a retornar (default 5)
+        
+    Returns:
+        Lista de diccionarios con información de los últimos partidos
+    """
+    try:
+        from nba_api.stats.endpoints import teamgamelogs
+        import time
+        
+        time.sleep(0.6)
+        
+        game_logs = teamgamelogs.TeamGameLogs(
+            season_nullable=nba_client.current_season,
+            team_id_nullable=team_id
+        )
+        
+        df = game_logs.get_data_frames()[0]
+        
+        if df.empty:
+            return {"team_id": team_id, "games": []}
+        
+        # Tomar los últimos N partidos
+        recent = df.head(last_n)
+        
+        games = []
+        for _, row in recent.iterrows():
+            # Determinar W/L
+            result = "W" if row['WL'] == 'W' else "L"
+            pts_for = int(row.get('PTS', 0))
+            plus_minus = int(row.get('PLUS_MINUS', 0))
+            pts_against = pts_for - plus_minus
+            
+            games.append({
+                "game_id": row.get('Game_ID', ''),
+                "date": row.get('GAME_DATE', ''),
+                "matchup": row.get('MATCHUP', ''),
+                "result": f"{result} {pts_for}-{pts_against}",
+                "pts": pts_for,
+                "reb": int(row.get('REB', 0)),
+                "ast": int(row.get('AST', 0)),
+                "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
+                "fg3m": int(row.get('FG3M', 0)),
+                "to": int(row.get('TOV', 0))
+            })
+        
+        return {
+            "team_id": team_id,
+            "games": games,
+            "total": len(games)
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo partidos recientes del equipo: {str(e)}"
+        )
+ 
+ 
+@app.get("/api/h2h")
+async def get_h2h_history(home_team_id: int, away_team_id: int, last_n: int = 10):
+    """
+    Obtiene el historial de enfrentamientos (H2H) entre dos equipos.
+    
+    Args:
+        home_team_id: ID del equipo local
+        away_team_id: ID del equipo visitante
+        last_n: Número de enfrentamientos a retornar (default 10)
+        
+    Returns:
+        Historial H2H con resultados y estadísticas
+    """
+    try:
+        from nba_api.stats.endpoints import leaguegamefinder
+        import time
+        
+        time.sleep(0.6)
+        
+        # Obtener todos los partidos del equipo local
+        game_finder = leaguegamefinder.LeagueGameFinder(
+            season_nullable=nba_client.current_season,
+            team_id_nullable=home_team_id
+        )
+        
+        df = game_finder.get_data_frames()[0]
+        if df.empty:
+            return {
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "matchups": [],
+                "away_wins": 0,
+                "home_wins": 0,
+                "total_matchups": 0
+            }
+
+        teams_map = {t['id']: t for t in nba_client.teams_data}
+        away_abbr = teams_map.get(away_team_id, {}).get('abbreviation', '').upper()
+        
+        # Filtrar H2H de forma robusta: preferir OPPONENT_TEAM_ID si existe,
+        # de lo contrario usar MATCHUP + abreviatura del rival.
+        if 'OPPONENT_TEAM_ID' in df.columns:
+            h2h = df[df['OPPONENT_TEAM_ID'] == away_team_id].head(last_n)
+        elif away_abbr and 'MATCHUP' in df.columns:
+            h2h = df[df['MATCHUP'].astype(str).str.contains(away_abbr, na=False)].head(last_n)
+        else:
+            h2h = df.head(0)
+        
+        if h2h.empty:
+            return {
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "matchups": [],
+                "away_wins": 0,
+                "home_wins": 0,
+                "total_matchups": 0
+            }
+        
+        matchups = []
+        away_wins = 0
+        home_wins = 0
+        
+        for _, row in h2h.iterrows():
+            result = "W" if row['WL'] == 'W' else "L"
+            
+            # El DataFrame está en la perspectiva del equipo local (home_team_id)
+            if result == "W":
+                home_wins += 1
+            else:
+                away_wins += 1
+
+            matchup_text = str(row.get('MATCHUP', ''))
+            if 'vs.' in matchup_text:
+                location = "HOME"
+            elif '@' in matchup_text:
+                location = "AWAY"
+            else:
+                location = "UNKNOWN"
+
+            pts_for = int(row.get('PTS', 0))
+            plus_minus = int(row.get('PLUS_MINUS', 0))
+            pts_against = pts_for - plus_minus
+            
+            matchups.append({
+                "date": row.get('GAME_DATE', ''),
+                "matchup": matchup_text,
+                "result": result,
+                "pts_for": pts_for,
+                "pts_against": pts_against,
+                "location": location
+            })
+        
+        return {
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "matchups": matchups,
+            "away_wins": away_wins,
+            "home_wins": home_wins,
+            "total_matchups": len(matchups),
+            "away_win_pct": round(away_wins / len(matchups) * 100, 1) if matchups else 0
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo historial H2H: {str(e)}"
+        )
+ 
+ 
+@app.get("/api/game/{game_id}/preview")
+async def get_game_preview(game_id: str):
+    """
+    Obtiene una vista previa completa del partido con estadísticas de ambos equipos.
+    
+    Args:
+        game_id: ID único del partido
+        
+    Returns:
+        Objeto con información consolidada del partido
+    """
+    try:
+        # Obtener info del partido
+        games = nba_client.get_todays_games()
+        target_game = next((g for g in games if g['game_id'] == game_id), None)
+        
+        if not target_game:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Partido {game_id} no encontrado"
+            )
+        
+        home_id = target_game['home_team_id']
+        away_id = target_game['away_team_id']
+        
+        # Obtener estadísticas de ambos equipos
+        home_stats_resp = await get_team_stats(home_id)
+        away_stats_resp = await get_team_stats(away_id)
+        
+        # Obtener últimos partidos
+        home_recent_resp = await get_team_recent_games(home_id, last_n=5)
+        away_recent_resp = await get_team_recent_games(away_id, last_n=5)
+        
+        # Obtener H2H
+        h2h_resp = await get_h2h_history(home_id, away_id, last_n=10)
+        
+        return {
+            "game_id": game_id,
+            "game_info": {
+                "home_team": target_game['home_team'],
+                "away_team": target_game['away_team'],
+                "game_time": target_game.get('game_time'),
+                "game_status": target_game.get('game_status')
+            },
+            "home_team": home_stats_resp,
+            "away_team": away_stats_resp,
+            "home_recent_games": home_recent_resp.get('games', []),
+            "away_recent_games": away_recent_resp.get('games', []),
+            "h2h": h2h_resp,
+            "preview_timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo vista previa del partido: {str(e)}"
+        )
 
 
 # Ejecutar servidor

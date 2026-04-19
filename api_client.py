@@ -198,9 +198,7 @@ class NBADataClient:
                                         'PLAYER_NAME': full_name,
                                         'TEAM_NAME': team_name,
                                         'Current_Status': mapped_status,
-                                        'Comment': injury.get('details', {}).get('type', 'Injury'),
-                                        'ESPN_ID': espn_id,
-                                        'HEADSHOT': athlete.get('headshot', {}).get('href', '')
+                                        'Comment': injury.get('details', {}).get('type', 'Injury')
                                     })
                                     
                         except Exception as e:
