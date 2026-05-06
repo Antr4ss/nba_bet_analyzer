@@ -1,4 +1,4 @@
-"""
+﻿"""
 game_dashboard.py
 Página principal mejorada con Game Overview, últimos 5 partidos, H2H y estadísticas.
 Integrado con el backend de NBA Betting Analyzer.
@@ -11,15 +11,17 @@ from datetime import datetime
 from dateutil import parser, tz
 import time
 import html
+import re
 from typing import Dict, List, Optional
 
 # ============================================================================
 # CONFIGURACIÓN
 # ============================================================================
 BACKEND_URL = "http://localhost:8000"
+PAGE_ICON_URL = "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f3c0.png?v=1"
 st.set_page_config(
     page_title="NBA Game Dashboard",
-    page_icon="🏀",
+    page_icon=PAGE_ICON_URL,
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -284,6 +286,42 @@ DASHBOARD_STYLES = """
         inset: 0;
         background: radial-gradient(ellipse 60% 40% at 80% 20%, rgba(200,16,46,0.07), transparent);
         pointer-events: none;
+    }
+
+    /* ─── Tarjetas de predicción de apuestas ─── */
+    .bet-card {
+        background: linear-gradient(135deg, rgba(26,26,38,0.98), rgba(18,18,26,0.98));
+        border: 1px solid var(--nba-border);
+        border-radius: 12px;
+        padding: 1rem 1.1rem;
+        margin: 0.8rem 0;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .bet-card h4 {
+        margin: 0 0 0.45rem 0;
+        font-family: 'Barlow Condensed', sans-serif;
+        letter-spacing: 0.06em;
+        font-size: 1.03rem;
+    }
+    .bet-card .bet-main {
+        font-family: 'Bebas Neue', sans-serif;
+        font-size: 2rem;
+        line-height: 1;
+        letter-spacing: 0.05em;
+        margin: 0.2rem 0 0.35rem;
+    }
+    .bet-over { color: #2ECC71; }
+    .bet-under { color: #FF5567; }
+    .bet-pass { color: #F0B429; }
+    .bet-meta {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        letter-spacing: 0.04em;
+    }
+    .bet-reason {
+        margin: 0.2rem 0;
+        color: #D6D6E8;
+        font-size: 0.9rem;
     }
 
     /* ─── Tablas estilo Bootstrap ─── */
@@ -610,13 +648,38 @@ def apply_dashboard_styles():
     """Inyecta estilos en cada ejecución para evitar pérdida de CSS en multipágina."""
     st.markdown(DASHBOARD_STYLES, unsafe_allow_html=True)
 
+
+def check_backend_health(max_retries: int = 2, timeout: int = 6) -> bool:
+    """Verifica salud del backend con reintentos para evitar falsos negativos por timeout transitorio."""
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(f"{BACKEND_URL}/health", timeout=timeout)
+            if response.status_code == 200:
+                return True
+        except Exception:
+            pass
+
+        if attempt < max_retries:
+            time.sleep(0.35 * (attempt + 1))
+
+    return False
+
 # ============================================================================
 # FUNCIONES DE API
 # ============================================================================
-def get_todays_games() -> List[Dict]:
-    """Obtiene los partidos de hoy."""
+@st.cache_data(ttl=300, show_spinner=False)
+def get_todays_games(date: str = None) -> List[Dict]:
+    """Obtiene los partidos de una fecha específica."""
     try:
-        response = requests.get(f"{BACKEND_URL}/api/games/today", timeout=30)
+        params = {}
+        if date:
+            params["date"] = date
+
+        response = requests.get(
+            f"{BACKEND_URL}/api/games/today",
+            params=params,
+            timeout=30
+        )
         if response.status_code == 200:
             return response.json()
         return []
@@ -625,7 +688,26 @@ def get_todays_games() -> List[Dict]:
         return []
 
 
-def get_team_recent_games(team_id: int, last_n: int = 5) -> pd.DataFrame:
+@st.cache_data(ttl=180, show_spinner=False)
+def get_game_preview(game_id: str, as_of_date: Optional[str] = None) -> Dict:
+    """Obtiene la vista previa consolidada del partido desde el backend."""
+    try:
+        params = {}
+        if as_of_date:
+            params['date'] = as_of_date
+        response = requests.get(
+            f"{BACKEND_URL}/api/game/{game_id}/preview",
+            params=params,
+            timeout=60,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {}
+    except Exception:
+        return {}
+
+
+def get_team_recent_games(team_id: int, last_n: int = 5, as_of_date: Optional[str] = None) -> pd.DataFrame:
     """
     Obtiene los últimos N partidos de un equipo.
     Usa el endpoint de team_gamelogs indirectamente a través del backend.
@@ -634,18 +716,21 @@ def get_team_recent_games(team_id: int, last_n: int = 5) -> pd.DataFrame:
         # Este endpoint aún no existe, lo agregaremos al backend
         response = requests.get(
             f"{BACKEND_URL}/api/team/{team_id}/recent-games",
-            params={"last_n": last_n},
+            params={
+                "last_n": last_n,
+                "as_of_date": as_of_date,
+            },
             timeout=30
         )
         if response.status_code == 200:
             data = response.json()
             return pd.DataFrame(data.get('games', []))
         return pd.DataFrame()
-    except Exception as e:
-        st.warning(f"No se pudieron cargar los últimos partidos del equipo: {e}")
+    except Exception:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_team_stats(team_id: int) -> Dict:
     """Obtiene estadísticas generales del equipo."""
     try:
@@ -660,7 +745,8 @@ def get_team_stats(team_id: int) -> Dict:
         return {}
 
 
-def get_h2h_history(home_team_id: int, away_team_id: int) -> Dict:
+@st.cache_data(ttl=180, show_spinner=False)
+def get_h2h_history(home_team_id: int, away_team_id: int, as_of_date: Optional[str] = None) -> Dict:
     """Obtiene el historial H2H entre dos equipos."""
     try:
         response = requests.get(
@@ -668,7 +754,8 @@ def get_h2h_history(home_team_id: int, away_team_id: int) -> Dict:
             params={
                 "home_team_id": home_team_id,
                 "away_team_id": away_team_id,
-                "last_n": 10
+                "last_n": 10,
+                "as_of_date": as_of_date,
             },
             timeout=30
         )
@@ -679,8 +766,173 @@ def get_h2h_history(home_team_id: int, away_team_id: int) -> Dict:
         return {}
 
 
-def format_game_time(game_time_str: str, game_status: str = None) -> str:
-    """Convierte la hora del partido a hora de Colombia."""
+@st.cache_data(ttl=180, show_spinner=False)
+def get_injury_report_data() -> List[Dict]:
+    """Obtiene lesiones globales con cache para evitar golpear el backend en cada rerun."""
+    try:
+        response = requests.get(f"{BACKEND_URL}/api/injury-report", timeout=30)
+        if response.status_code == 200:
+            return response.json().get('injuries', [])
+        return []
+    except Exception:
+        return []
+
+
+def _safe_mean(values: List[float]) -> float:
+    clean = [float(v) for v in values if v is not None]
+    return sum(clean) / len(clean) if clean else 0.0
+
+
+def _extract_pts_against(result_text: str) -> Optional[int]:
+    """Extrae puntos en contra desde un string tipo 'W 112-108'."""
+    if not result_text:
+        return None
+    match = re.search(r"[WL]\s+(\d+)-(\d+)", str(result_text).strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(2))
+
+
+def _team_recent_profile(recent_games) -> Dict[str, float]:
+    """Calcula perfil ofensivo/defensivo reciente para el modelo de total."""
+    # Convertir lista a DataFrame si es necesario
+    if isinstance(recent_games, list):
+        recent_games = pd.DataFrame(recent_games)
+    elif not isinstance(recent_games, pd.DataFrame):
+        recent_games = pd.DataFrame()
+    
+    if recent_games.empty:
+        return {
+            "avg_for": 0.0,
+            "avg_against": 0.0,
+            "avg_total": 0.0,
+            "win_rate": 0.0,
+            "sample": 0,
+        }
+
+    pts_for = pd.to_numeric(recent_games.get("pts"), errors="coerce") if "pts" in recent_games.columns else pd.Series(dtype=float)
+    pts_against = recent_games.get("result", pd.Series(dtype=str)).apply(_extract_pts_against) if "result" in recent_games.columns else pd.Series(dtype=float)
+
+    results = recent_games.get("result", pd.Series(dtype=str)).fillna("").astype(str)
+    wins = (results.str.strip().str.upper().str.startswith("W")).sum()
+    sample = len(recent_games)
+
+    avg_for = _safe_mean(pts_for.dropna().tolist())
+    avg_against = _safe_mean([x for x in pts_against.tolist() if x is not None])
+
+    return {
+        "avg_for": avg_for,
+        "avg_against": avg_against,
+        "avg_total": avg_for + avg_against,
+        "win_rate": (wins / sample) if sample else 0.0,
+        "sample": sample,
+    }
+
+
+def build_game_betting_insights(game: Dict, as_of_date: Optional[str] = None, context: Optional[Dict] = None) -> Dict:
+    """Construye predicciones de total, moneyline y team totals para un partido."""
+    context = context or {}
+    away_recent = context.get("away_recent_games")
+    home_recent = context.get("home_recent_games")
+    h2h_data = context.get("h2h")
+
+    if away_recent is None:
+        away_recent = get_team_recent_games(game["away_team_id"], last_n=5, as_of_date=as_of_date)
+    if home_recent is None:
+        home_recent = get_team_recent_games(game["home_team_id"], last_n=5, as_of_date=as_of_date)
+    if h2h_data is None:
+        h2h_data = get_h2h_history(game["home_team_id"], game["away_team_id"], as_of_date=as_of_date)
+
+    away_profile = _team_recent_profile(away_recent)
+    home_profile = _team_recent_profile(home_recent)
+
+    away_proj = (away_profile["avg_for"] * 0.55) + (home_profile["avg_against"] * 0.45)
+    home_proj = (home_profile["avg_for"] * 0.55) + (away_profile["avg_against"] * 0.45)
+    base_total = away_proj + home_proj
+
+    h2h_totals: List[float] = []
+    for row in h2h_data.get("matchups", []):
+        pts_for = row.get("pts_for")
+        pts_against = row.get("pts_against")
+        try:
+            if pts_for is not None and pts_against is not None:
+                h2h_totals.append(float(pts_for) + float(pts_against))
+        except Exception:
+            continue
+
+    h2h_avg_total = _safe_mean(h2h_totals)
+    projected_total = (base_total * 0.75 + h2h_avg_total * 0.25) if h2h_avg_total > 0 else base_total
+
+    model_line = round(projected_total * 2) / 2
+
+    projected_margin = (home_proj + 2.5) - away_proj
+    if projected_margin >= 2:
+        moneyline_pick = f"ML {game['home_team']}"
+    elif projected_margin <= -2:
+        moneyline_pick = f"ML {game['away_team']}"
+    else:
+        moneyline_pick = "Sin edge claro"
+
+    moneyline_conf = min(82.0, 52.0 + abs(projected_margin) * 4)
+
+    return {
+        "projected_total": projected_total,
+        "model_line": model_line,
+        "away_proj": away_proj,
+        "home_proj": home_proj,
+        "h2h_avg_total": h2h_avg_total,
+        "h2h_sample": len(h2h_totals),
+        "moneyline_pick": moneyline_pick,
+        "moneyline_conf": moneyline_conf,
+        "projected_margin": projected_margin,
+        "away_profile": away_profile,
+        "home_profile": home_profile,
+    }
+
+
+def evaluate_over_under_pick(projected_total: float, market_line: float, sample_boost: float = 0.0) -> Dict:
+    """Evalúa recomendación O/U comparando modelo vs línea de mercado."""
+    diff = projected_total - market_line
+    if diff >= 3:
+        pick = "OVER"
+        css_class = "bet-over"
+    elif diff <= -3:
+        pick = "UNDER"
+        css_class = "bet-under"
+    else:
+        pick = "PASS"
+        css_class = "bet-pass"
+
+    confidence = 55.0 + min(24.0, abs(diff) * 4.0) + sample_boost
+    if pick == "PASS":
+        confidence = min(confidence, 60.0)
+    confidence = min(confidence, 87.0)
+
+    reasons = []
+    reasons.append(f"Modelo: {projected_total:.1f} pts vs mercado {market_line:.1f}")
+    reasons.append(f"Diferencia estimada: {diff:+.1f} pts")
+    if abs(diff) >= 5:
+        reasons.append("Ventaja estadística amplia frente a la línea")
+    elif abs(diff) >= 3:
+        reasons.append("Ventaja moderada frente a la línea")
+    else:
+        reasons.append("Línea muy ajustada, evitar sobreexposición")
+
+    return {
+        "pick": pick,
+        "class": css_class,
+        "confidence": confidence,
+        "edge": diff,
+        "reasons": reasons,
+    }
+
+
+def format_game_time(
+    game_time_str: str,
+    game_status: str = None,
+    display_date: Optional[str] = None,
+) -> str:
+    """Convierte la hora del partido a hora de Colombia y conserva la fecha elegida si el juego no ha iniciado."""
     if not game_time_str or game_time_str == 'TBD':
         return game_status or 'TBD'
     
@@ -696,8 +948,12 @@ def format_game_time(game_time_str: str, game_status: str = None) -> str:
             et_time = et_time.replace(tzinfo=et_zone)
         
         col_time = et_time.astimezone(col_zone)
+        if display_date and display_date != col_time.strftime('%Y-%m-%d'):
+            return f"{display_date[8:10]}/{display_date[5:7]} {col_time.strftime('%I:%M %p COT')}"
         return col_time.strftime('%d/%m %I:%M %p COT')
     except Exception:
+        if display_date:
+            return display_date
         return game_status or game_time_str
 
 
@@ -805,12 +1061,71 @@ def render_bootstrap_table(
     return table_html
 
 
+def display_betting_predictions(game: Dict, as_of_date: Optional[str] = None, context: Optional[Dict] = None):
+    """Renderiza predicciones de apuestas del partido (total, ML y props)."""
+    st.header("💸 Predicción y Sugerencias de Apuesta")
+    st.caption("Modelo rápido con forma reciente + H2H hasta la fecha seleccionada. Usa las sugerencias como apoyo, no como garantía.")
+
+    insights = build_game_betting_insights(game, as_of_date=as_of_date, context=context)
+
+    market_line = st.number_input(
+        "Línea de mercado Over/Under (Total del partido)",
+        min_value=150.0,
+        max_value=280.0,
+        value=float(insights["model_line"]),
+        step=0.5,
+        key=f"ou_market_line_{game['game_id']}",
+    )
+
+    sample_boost = 3.0 if insights["h2h_sample"] >= 5 else 0.0
+    total_pick = evaluate_over_under_pick(
+        projected_total=insights["projected_total"],
+        market_line=float(market_line),
+        sample_boost=sample_boost,
+    )
+
+    col_ou, col_ml = st.columns(2)
+
+    with col_ou:
+        st.markdown(
+            f"""
+            <div class="bet-card">
+                <h4>Total del Partido (Over/Under)</h4>
+                <div class="bet-main {total_pick['class']}">{total_pick['pick']}</div>
+                <p class="bet-meta">Proyección modelo: <strong>{insights['projected_total']:.1f}</strong> · Línea mercado: <strong>{market_line:.1f}</strong></p>
+                <p class="bet-meta">Confianza estimada: <strong>{total_pick['confidence']:.0f}%</strong> · Edge: <strong>{total_pick['edge']:+.1f}</strong></p>
+                {''.join([f"<p class='bet-reason'>{html.escape(reason)}</p>" for reason in total_pick['reasons']])}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_ml:
+        home_team_total_line = round(insights["home_proj"] * 2) / 2
+        away_team_total_line = round(insights["away_proj"] * 2) / 2
+        st.markdown(
+            f"""
+            <div class="bet-card">
+                <h4>Picks Complementarios</h4>
+                <p class="bet-main" style="color:#7BA3FF;">{html.escape(insights['moneyline_pick'])}</p>
+                <p class="bet-meta">Confianza Moneyline: <strong>{insights['moneyline_conf']:.0f}%</strong> · Margen proyectado: <strong>{insights['projected_margin']:+.1f}</strong></p>
+                <p class="bet-reason">Total de equipo {html.escape(game['home_team'])}: <strong>{home_team_total_line:.1f}</strong> (línea modelo)</p>
+                <p class="bet-reason">Total de equipo {html.escape(game['away_team'])}: <strong>{away_team_total_line:.1f}</strong> (línea modelo)</p>
+                <p class="bet-reason">H2H promedio total usado: <strong>{insights['h2h_avg_total']:.1f}</strong> en {insights['h2h_sample']} juegos</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.info("Esta sección muestra solo sugerencias del partido (totales y moneyline).")
+
+
 # ============================================================================
 # COMPONENTES DE UI
 # ============================================================================
-def display_game_header(game: Dict):
+def display_game_header(game: Dict, selected_date: Optional[str] = None):
     """Muestra el encabezado principal del partido."""
-    game_time = format_game_time(game.get('game_time'), game.get('game_status'))
+    game_time = format_game_time(game.get('game_time'), game.get('game_status'), selected_date)
     away_logo = get_team_logo_url(game.get('away_team_id'))
     home_logo = get_team_logo_url(game.get('home_team_id'))
     
@@ -841,242 +1156,201 @@ def display_game_header(game: Dict):
     """, unsafe_allow_html=True)
 
 
-def display_team_stats(team_name: str, team_id: int, is_away: bool = False):
+def display_team_stats(team_name: str, team_id: int, is_away: bool = False, team_stats: Optional[Dict] = None):
     """Muestra estadísticas generales del equipo."""
     with st.container():
         st.subheader(f"{'🏃 Visitante' if is_away else '🏠 Local'}: {team_name}")
-        
-        # Obtener estadísticas del backend
-        try:
-            response = requests.get(
-                f"{BACKEND_URL}/api/team/{team_id}/stats",
-                timeout=10
-            )
-            if response.status_code == 200:
-                stats = response.json()
-                
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.markdown(f"""
-                    <div class="stat-box">
-                        <div class="stat-label">Promedio Pts</div>
-                        <div class="stat-value">{stats.get('pts_per_game', 0)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    st.markdown(f"""
-                    <div class="stat-box">
-                        <div class="stat-label">Promedio Reb</div>
-                        <div class="stat-value">{stats.get('reb_per_game', 0)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col3:
-                    st.markdown(f"""
-                    <div class="stat-box">
-                        <div class="stat-label">Promedio Ast</div>
-                        <div class="stat-value">{stats.get('ast_per_game', 0)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col4:
-                    st.markdown(f"""
-                    <div class="stat-box">
-                        <div class="stat-label">Record</div>
-                        <div class="stat-value">{stats.get('wins', 0)}-{stats.get('losses', 0)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                # Estadísticas adicionales en fila expandible
-                with st.expander("📊 Estadísticas Completas"):
-                    col_a, col_b, col_c = st.columns(3)
-                    
-                    with col_a:
-                        st.metric("FG%", f"{stats.get('fg_pct', 0)*100:.1f}%")
-                    
-                    with col_b:
-                        st.metric("3P%", f"{stats.get('fg3_pct', 0)*100:.1f}%")
-                    
-                    with col_c:
-                        st.metric("Win %", f"{stats.get('win_pct', 0)*100:.1f}%")
-            else:
-                st.warning("No se pudieron cargar las estadísticas")
-        except Exception as e:
-            st.warning(f"Error cargando estadísticas: {e}")
+
+        stats = team_stats or get_team_stats(team_id)
+        if not stats:
+            st.warning("No se pudieron cargar las estadísticas")
+            return
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Promedio Pts</div>
+                <div class="stat-value">{stats.get('pts_per_game', 0)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Promedio Reb</div>
+                <div class="stat-value">{stats.get('reb_per_game', 0)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col3:
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Promedio Ast</div>
+                <div class="stat-value">{stats.get('ast_per_game', 0)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col4:
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Record</div>
+                <div class="stat-value">{stats.get('wins', 0)}-{stats.get('losses', 0)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Estadísticas adicionales en fila expandible
+        with st.expander("📊 Estadísticas Completas"):
+            col_a, col_b, col_c = st.columns(3)
+
+            with col_a:
+                st.metric("FG%", f"{stats.get('fg_pct', 0)*100:.1f}%")
+
+            with col_b:
+                st.metric("3P%", f"{stats.get('fg3_pct', 0)*100:.1f}%")
+
+            with col_c:
+                st.metric("Win %", f"{stats.get('win_pct', 0)*100:.1f}%")
 
 
-def display_recent_games(team_name: str, team_id: int):
+def display_recent_games(team_name: str, team_id: int, as_of_date: Optional[str] = None, recent_games: Optional[pd.DataFrame] = None):
     """Muestra los últimos 5 partidos del equipo."""
     st.subheader(f"📊 Últimos 5 Partidos - {team_name}")
     
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/api/team/{team_id}/recent-games",
-            params={"last_n": 5},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            games = data.get('games', [])
-            
-            if games:
-                # Convertir a DataFrame
-                df = pd.DataFrame(games)
-                
-                # Seleccionar columnas y renombrar
-                display_cols = {
-                    'date': 'Fecha',
-                    'matchup': 'Rival',
-                    'result': 'Resultado',
-                    'pts': 'Pts',
-                    'reb': 'Reb',
-                    'ast': 'Ast'
-                }
-                
-                df_display = df[[col for col in display_cols.keys() if col in df.columns]].copy()
-                df_display = df_display.rename(columns=display_cols)
-                if 'Fecha' in df_display.columns:
-                    df_display['Fecha'] = pd.to_datetime(df_display['Fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
-                    df_display['Fecha'] = df_display['Fecha'].fillna('')
-                
-                st.markdown(
-                    render_bootstrap_table(df_display, highlight_columns=['Resultado']),
-                    unsafe_allow_html=True
-                )
-            else:
-                st.info("Sin datos de partidos recientes disponibles")
-        else:
-            st.warning("No se pudieron cargar los partidos recientes")
-    except Exception as e:
-        st.warning(f"Error cargando partidos: {e}")
+    df = recent_games if recent_games is not None else get_team_recent_games(team_id, last_n=5, as_of_date=as_of_date)
+    if df.empty:
+        st.info("Sin datos de partidos recientes disponibles")
+        return
+
+    # Seleccionar columnas y renombrar
+    display_cols = {
+        'date': 'Fecha',
+        'matchup': 'Rival',
+        'result': 'Resultado',
+        'pts': 'Pts',
+        'reb': 'Reb',
+        'ast': 'Ast'
+    }
+
+    df_display = df[[col for col in display_cols.keys() if col in df.columns]].copy()
+    df_display = df_display.rename(columns=display_cols)
+    if 'Fecha' in df_display.columns:
+        df_display['Fecha'] = pd.to_datetime(df_display['Fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_display['Fecha'] = df_display['Fecha'].fillna('')
+
+    st.markdown(
+        render_bootstrap_table(df_display, highlight_columns=['Resultado']),
+        unsafe_allow_html=True
+    )
 
 
-def display_h2h(home_team: str, away_team: str, home_id: int, away_id: int):
+def display_h2h(home_team: str, away_team: str, home_id: int, away_id: int, as_of_date: Optional[str] = None, h2h_data: Optional[Dict] = None):
     """Muestra el historial H2H entre los dos equipos."""
     st.subheader(f"🔄 Historial H2H: {away_team} vs {home_team}")
     
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/api/h2h",
-            params={
-                "home_team_id": home_id,
-                "away_team_id": away_id,
-                "last_n": 10
+    h2h_data = h2h_data or get_h2h_history(home_id, away_id, as_of_date=as_of_date)
+    matchups = h2h_data.get('matchups', []) if h2h_data else []
+
+    if not matchups:
+        st.info("Sin enfrentamientos previos encontrados")
+        return
+
+    df_h2h = pd.DataFrame(matchups)
+    h2h_display_cols = {
+        'date': 'FECHA',
+        'matchup': 'ENFRENTAMIENTO',
+        'result': 'RESULTADO',
+        'pts_for': 'PTS A FAVOR',
+        'pts_against': 'PTS EN CONTRA',
+        'reb_home': 'REB LOCAL',
+        'reb_away': 'REB VISITANTE'
+    }
+    df_h2h = df_h2h[[col for col in h2h_display_cols.keys() if col in df_h2h.columns]].copy()
+    df_h2h = df_h2h.rename(columns=h2h_display_cols)
+    if 'FECHA' in df_h2h.columns:
+        df_h2h['FECHA'] = pd.to_datetime(df_h2h['FECHA'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_h2h['FECHA'] = df_h2h['FECHA'].fillna('')
+
+    # Estadísticas H2H
+    away_wins = h2h_data.get('away_wins', 0)
+    home_wins = h2h_data.get('home_wins', 0)
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        record = f"{away_wins}-{home_wins}"
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-label">{away_team} vs {home_team}</div>
+            <div class="stat-value">{record}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        if not df_h2h.empty:
+            avg_away = df_h2h['PTS A FAVOR'].mean() if 'PTS A FAVOR' in df_h2h.columns else 0
+            avg_home = df_h2h['PTS EN CONTRA'].mean() if 'PTS EN CONTRA' in df_h2h.columns else 0
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Promedio Pts</div>
+                <div class="stat-value">{avg_away:.1f}-{avg_home:.1f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col3:
+        if not df_h2h.empty:
+            total_pts = (df_h2h['PTS A FAVOR'] + df_h2h['PTS EN CONTRA']).mean() if all(col in df_h2h.columns for col in ['PTS A FAVOR', 'PTS EN CONTRA']) else 0
+            st.markdown(f"""
+            <div class="stat-box">
+                <div class="stat-label">Promedio Total</div>
+                <div class="stat-value">{total_pts:.1f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown(
+        render_bootstrap_table(
+            df_h2h,
+            format_map={
+                'PTS A FAVOR': '{:.0f}',
+                'PTS EN CONTRA': '{:.0f}',
+                'REB LOCAL': '{:.0f}',
+                'REB VISITANTE': '{:.0f}'
             },
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            h2h_data = response.json()
-            matchups = h2h_data.get('matchups', [])
-            
-            if matchups:
-                df_h2h = pd.DataFrame(matchups)
-                h2h_display_cols = {
-                    'date': 'FECHA',
-                    'matchup': 'ENFRENTAMIENTO',
-                    'result': 'RESULTADO',
-                    'pts_for': 'PTS A FAVOR',
-                    'pts_against': 'PTS EN CONTRA'
-                }
-                df_h2h = df_h2h[[col for col in h2h_display_cols.keys() if col in df_h2h.columns]].copy()
-                df_h2h = df_h2h.rename(columns=h2h_display_cols)
-                if 'FECHA' in df_h2h.columns:
-                    df_h2h['FECHA'] = pd.to_datetime(df_h2h['FECHA'], errors='coerce').dt.strftime('%Y-%m-%d')
-                    df_h2h['FECHA'] = df_h2h['FECHA'].fillna('')
-                
-                # Estadísticas H2H
-                away_wins = h2h_data.get('away_wins', 0)
-                home_wins = h2h_data.get('home_wins', 0)
-                total = away_wins + home_wins
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    record = f"{away_wins}-{home_wins}"
-                    st.markdown(f"""
-                    <div class="stat-box">
-                        <div class="stat-label">{away_team} vs {home_team}</div>
-                        <div class="stat-value">{record}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    if not df_h2h.empty:
-                        avg_away = df_h2h['pts_for'].mean() if 'pts_for' in df_h2h.columns else 0
-                        avg_home = df_h2h['pts_against'].mean() if 'pts_against' in df_h2h.columns else 0
-                        st.markdown(f"""
-                        <div class="stat-box">
-                            <div class="stat-label">Promedio Pts</div>
-                            <div class="stat-value">{avg_away:.1f}-{avg_home:.1f}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                
-                with col3:
-                    if not df_h2h.empty:
-                        total_pts = (df_h2h['pts_for'] + df_h2h['pts_against']).mean() if all(col in df_h2h.columns for col in ['pts_for', 'pts_against']) else 0
-                        st.markdown(f"""
-                        <div class="stat-box">
-                            <div class="stat-label">Promedio Total</div>
-                            <div class="stat-value">{total_pts:.1f}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                
-                st.markdown(
-                    render_bootstrap_table(
-                        df_h2h,
-                        format_map={'PTS A FAVOR': '{:.0f}', 'PTS EN CONTRA': '{:.0f}'},
-                        highlight_columns=['RESULTADO']
-                    ),
-                    unsafe_allow_html=True
-                )
-            else:
-                st.info("Sin enfrentamientos previos encontrados")
-        else:
-            st.warning("No se pudo obtener el historial H2H")
-    except Exception as e:
-        st.warning(f"Error cargando H2H: {e}")
+            highlight_columns=['RESULTADO']
+        ),
+        unsafe_allow_html=True
+    )
 
 
-def display_injury_report(home_team: str, away_team: str):
+def display_injury_report(home_team: str, away_team: str, injuries: Optional[List[Dict]] = None):
     """Muestra lesiones de ambos equipos."""
     st.subheader("🏥 Reporte de Lesiones")
     
-    try:
-        response = requests.get(f"{BACKEND_URL}/api/injury-report", timeout=15)
-        if response.status_code == 200:
-            injury_data = response.json()
-            injuries = injury_data.get('injuries', [])
-            
-            if injuries:
-                df_injuries = pd.DataFrame(injuries)
-                
-                # Filtrar por equipos en el partido
-                df_filtered = df_injuries[
-                    (df_injuries['TEAM_NAME'].str.contains(home_team, case=False, na=False)) |
-                    (df_injuries['TEAM_NAME'].str.contains(away_team, case=False, na=False))
-                ]
-                
-                if not df_filtered.empty:
-                    st.markdown("""
-                    <div class="injury-alert">
-                        ⚠️ Hay jugadores lesionados o cuestionables en este partido.
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    injury_table = df_filtered[['PLAYER_NAME', 'TEAM_NAME', 'Current_Status', 'Comment']]
-                    st.markdown(render_bootstrap_table(injury_table), unsafe_allow_html=True)
-                else:
-                    st.info("✅ Sin lesiones reportadas en estos equipos")
-            else:
-                st.info("Sin datos de lesiones disponibles")
-        else:
-            st.warning("No se pudo obtener el reporte de lesiones")
-    except Exception as e:
-        st.warning(f"Error cargando lesiones: {e}")
+    injuries = injuries if injuries is not None else get_injury_report_data()
+    if not injuries:
+        st.info("Sin datos de lesiones disponibles")
+        return
+
+    df_injuries = pd.DataFrame(injuries)
+
+    # Filtrar por equipos en el partido
+    df_filtered = df_injuries[
+        (df_injuries['TEAM_NAME'].str.contains(home_team, case=False, na=False)) |
+        (df_injuries['TEAM_NAME'].str.contains(away_team, case=False, na=False))
+    ]
+
+    if not df_filtered.empty:
+        st.markdown("""
+        <div class="injury-alert">
+            ⚠️ Hay jugadores lesionados o cuestionables en este partido.
+        </div>
+        """, unsafe_allow_html=True)
+
+        injury_table = df_filtered[['PLAYER_NAME', 'TEAM_NAME', 'Current_Status', 'Comment']]
+        st.markdown(render_bootstrap_table(injury_table), unsafe_allow_html=True)
+    else:
+        st.info("✅ Sin lesiones reportadas en estos equipos")
 
 
 # ============================================================================
@@ -1092,12 +1366,15 @@ def main():
                     letter-spacing:0.35em; color:#F0B429; text-transform:uppercase; margin-bottom:0.4rem;">
             Game Intelligence · Real-Time Stats
         </div>
-        <div style="font-family:'Bebas Neue',sans-serif; font-size:clamp(2.8rem,6vw,5rem);
-                    letter-spacing:0.06em; line-height:1;
-                    background:linear-gradient(135deg,#FFFFFF 30%,#F0B429 80%);
-                    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-                    background-clip:text;">
-            🏀 NBA Game Dashboard
+        <div style="display:flex; align-items:flex-end; justify-content:center; gap:0.45rem;">
+            <span style="font-size:clamp(2.2rem,5.4vw,4.3rem); line-height:1; filter:drop-shadow(0 4px 10px rgba(0,0,0,0.35));">🏀</span>
+            <div style="font-family:'Bebas Neue',sans-serif; font-size:clamp(2.8rem,6vw,5rem);
+                        letter-spacing:0.06em; line-height:1;
+                        background:linear-gradient(135deg,#FFFFFF 30%,#F0B429 80%);
+                        -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                        background-clip:text;">
+                NBA Game Dashboard
+            </div>
         </div>
         <div style="display:inline-block; width:60px; height:3px;
                     background:linear-gradient(90deg,#C8102E,#F0B429);
@@ -1107,25 +1384,40 @@ def main():
     """, unsafe_allow_html=True)
     st.markdown("---")
 
-    # Verificar salud del backend
-    try:
-        response = requests.get(f"{BACKEND_URL}/health", timeout=5)
-        if response.status_code != 200:
-            st.error("❌ Backend no disponible")
-            return
-    except:
-        st.error("❌ No se puede conectar con el backend")
-        return
+    # Verificar salud del backend sin bloquear toda la UI por un timeout transitorio.
+    backend_ok = check_backend_health(max_retries=2, timeout=6)
+    if not backend_ok:
+        st.warning("⚠️ El backend está lento o no responde temporalmente. Reintentando cargas en esta ejecución...")
     
-    # Obtener partidos disponibles
-    games = deduplicate_games(get_todays_games())
+    # Sidebar: selección de fecha y refresco
+    with st.sidebar:
+        st.header("Seleccionar Partido")
+        selected_date = st.date_input(
+            "📅 Selecciona una fecha:",
+            value=datetime.now().date(),
+            key="dashboard_selected_date"
+        )
+        date_str = selected_date.strftime("%Y-%m-%d") if selected_date else None
+        refresh_button = st.button("🔄 Actualizar Partidos", use_container_width=True)
+
+    # Obtener partidos según fecha (cacheados en sesión)
+    if "games" not in st.session_state or refresh_button:
+        with st.spinner("🔍 Cargando partidos..."):
+            st.session_state.games = get_todays_games(date=date_str)
+            st.session_state.current_date = date_str
+
+    if st.session_state.get("current_date") != date_str:
+        with st.spinner("🔍 Cargando partidos..."):
+            st.session_state.games = get_todays_games(date=date_str)
+            st.session_state.current_date = date_str
+
+    games = deduplicate_games(st.session_state.get("games", []))
     
     if not games:
-        st.warning("📭 No hay partidos disponibles para hoy")
+        st.warning(f"📭 No hay partidos disponibles para la fecha seleccionada: {date_str}")
         return
     
     # Selector de partido
-    st.sidebar.header("Seleccionar Partido")
     game_options = [f"{g['away_team']} @ {g['home_team']}" for g in games]
     selected_game_idx = st.sidebar.selectbox(
         "Elige un partido:",
@@ -1134,10 +1426,11 @@ def main():
     )
     
     selected_game = games[selected_game_idx]
+    preview_data = get_game_preview(selected_game['game_id'], as_of_date=date_str)
     
     # ====== GAME OVERVIEW ======
     st.divider()
-    display_game_header(selected_game)
+    display_game_header(selected_game, selected_date=date_str)
     
     # ====== TEAM STATS ======
     st.divider()
@@ -1149,14 +1442,16 @@ def main():
         display_team_stats(
             selected_game['away_team'],
             selected_game['away_team_id'],
-            is_away=True
+            is_away=True,
+            team_stats=preview_data.get('away_team') if preview_data else None
         )
     
     with col_home:
         display_team_stats(
             selected_game['home_team'],
             selected_game['home_team_id'],
-            is_away=False
+            is_away=False,
+            team_stats=preview_data.get('home_team') if preview_data else None
         )
     
     # ====== RECENT GAMES ======
@@ -1168,31 +1463,42 @@ def main():
     with col_away_recent:
         display_recent_games(
             selected_game['away_team'],
-            selected_game['away_team_id']
+            selected_game['away_team_id'],
+            as_of_date=date_str,
+            recent_games=pd.DataFrame(preview_data.get('away_recent_games', [])) if preview_data else None,
         )
     
     with col_home_recent:
         display_recent_games(
             selected_game['home_team'],
-            selected_game['home_team_id']
+            selected_game['home_team_id'],
+            as_of_date=date_str,
+            recent_games=pd.DataFrame(preview_data.get('home_recent_games', [])) if preview_data else None,
         )
     
     # ====== H2H HISTORY ======
     st.divider()
-    st.header("🔄 Enfrentamientos Previos (H2H)")
+    st.header("🔄 Enfrentamientos Previos (H2H) Esta Temporada")
     
     display_h2h(
         selected_game['home_team'],
         selected_game['away_team'],
         selected_game['home_team_id'],
-        selected_game['away_team_id']
+        selected_game['away_team_id'],
+        as_of_date=date_str,
+        h2h_data=preview_data.get('h2h') if preview_data else None,
     )
+
+    # ====== BETTING PREDICTIONS ======
+    st.divider()
+    display_betting_predictions(selected_game, as_of_date=date_str, context=preview_data)
     
     # ====== INJURY REPORT ======
     st.divider()
     display_injury_report(
         selected_game['home_team'],
-        selected_game['away_team']
+        selected_game['away_team'],
+        injuries=preview_data.get('injuries') if preview_data else None,
     )
     
     # ====== FOOTER ======

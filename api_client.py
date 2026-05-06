@@ -42,6 +42,11 @@ class NBADataClient:
         self._season_stats_cache = {}
         self._recent_games_cache = {}
         self._defense_cache = {}
+        self._games_cache = {}
+        self._injury_report_cache = {
+            'timestamp': 0.0,
+            'data': pd.DataFrame()
+        }
         
     def _normalize_name(self, name: str) -> str:
         """Normaliza un nombre eliminando acentos y caracteres especiales."""
@@ -74,6 +79,165 @@ class NBADataClient:
         except Exception as e:
             print(f"Error obteniendo estadísticas de todos los jugadores: {e}")
             return pd.DataFrame()
+
+    def _get_default_game_date(self) -> str:
+        """Devuelve la fecha actual en hora de Nueva York."""
+        return pd.Timestamp.now(tz='America/New_York').strftime('%Y-%m-%d')
+
+    def _get_team_info_by_id(self, team_id: int) -> Dict:
+        """Busca información estática de un equipo por ID."""
+        teams_map = {team['id']: team for team in self.teams_data}
+        return teams_map.get(int(team_id), {})
+
+    def _get_team_id_from_tricode(self, tricode: str) -> Optional[int]:
+        """Resuelve el ID del equipo a partir de su abreviatura."""
+        if not tricode:
+            return None
+
+        tricode = str(tricode).upper().strip()
+        for team in self.teams_data:
+            if team.get('abbreviation', '').upper() == tricode:
+                return team['id']
+        return None
+
+    def _build_game_info(self, game_id: str, home_team_id: int, away_team_id: int, game_time: str) -> Dict:
+        """Construye el payload estándar de un partido."""
+        home_team_info = self._get_team_info_by_id(home_team_id)
+        away_team_info = self._get_team_info_by_id(away_team_id)
+
+        return {
+            'game_id': str(game_id),
+            'home_team': home_team_info.get('nickname', 'Unknown'),
+            'away_team': away_team_info.get('nickname', 'Unknown'),
+            'game_time': game_time,
+            'home_team_id': int(home_team_id),
+            'away_team_id': int(away_team_id),
+            'home_team_tricode': home_team_info.get('abbreviation', ''),
+            'away_team_tricode': away_team_info.get('abbreviation', '')
+        }
+
+    def _get_games_from_live_scoreboard(self, date: str) -> List[Dict]:
+        """Intenta obtener partidos desde el scoreboard live."""
+        try:
+            board = scoreboard.ScoreBoard()
+            board_dict = board.get_dict()
+            scoreboard_data = board_dict.get('scoreboard', {})
+
+            if not isinstance(scoreboard_data, dict):
+                return []
+
+            games = scoreboard_data.get('games', [])
+            if not games:
+                return []
+
+            parsed_games = []
+            for game in games:
+                home_team = game.get('homeTeam', {}) or {}
+                away_team = game.get('awayTeam', {}) or {}
+
+                home_team_id = (
+                    home_team.get('teamId')
+                    or home_team.get('teamID')
+                    or home_team.get('id')
+                    or self._get_team_id_from_tricode(home_team.get('teamTricode') or home_team.get('tricode'))
+                )
+                away_team_id = (
+                    away_team.get('teamId')
+                    or away_team.get('teamID')
+                    or away_team.get('id')
+                    or self._get_team_id_from_tricode(away_team.get('teamTricode') or away_team.get('tricode'))
+                )
+
+                game_id = game.get('gameId') or game.get('gameID') or game.get('id')
+                game_time = (
+                    game.get('gameStatusText')
+                    or game.get('gameStatus')
+                    or game.get('gameClock')
+                    or game.get('gameTimeUTC')
+                    or game.get('gameDateTimeUTC')
+                    or ''
+                )
+
+                if not game_id or home_team_id is None or away_team_id is None:
+                    continue
+
+                parsed_games.append(self._build_game_info(game_id, home_team_id, away_team_id, game_time))
+
+            return parsed_games
+        except Exception as e:
+            print(f"Error obteniendo partidos desde scoreboard live para {date}: {e}")
+            return []
+
+    def _get_games_from_scoreboard_v2(self, date: str) -> List[Dict]:
+        """Obtiene partidos usando ScoreboardV2 como fallback."""
+        try:
+            board = scoreboardv2.ScoreboardV2(game_date=date)
+            games_header = board.game_header.get_dict()
+
+            if not games_header.get('data'):
+                return []
+
+            headers = games_header.get('headers', [])
+            idx_game_id = headers.index('GAME_ID')
+            idx_home_id = headers.index('HOME_TEAM_ID')
+            idx_away_id = headers.index('VISITOR_TEAM_ID')
+            idx_status = headers.index('GAME_STATUS_TEXT')
+
+            parsed_games = []
+            for row in games_header['data']:
+                parsed_games.append(self._build_game_info(
+                    row[idx_game_id],
+                    row[idx_home_id],
+                    row[idx_away_id],
+                    row[idx_status]
+                ))
+
+            return parsed_games
+        except Exception as e:
+            print(f"Error obteniendo partidos desde ScoreboardV2 para {date}: {e}")
+            return []
+
+    def _get_games_from_league_game_finder(self, date: str) -> List[Dict]:
+        """Intenta reconstruir el calendario del día con LeagueGameFinder."""
+        try:
+            finder = leaguegamefinder.LeagueGameFinder(
+                season_nullable=self.current_season,
+                date_from_nullable=date,
+                date_to_nullable=date
+            )
+            df = finder.get_data_frames()[0]
+
+            if df.empty or 'GAME_ID' not in df.columns:
+                return []
+
+            parsed_games = []
+            grouped_games = df.groupby('GAME_ID')
+
+            for game_id, game_df in grouped_games:
+                home_row = None
+                away_row = None
+
+                for _, row in game_df.iterrows():
+                    matchup = str(row.get('MATCHUP', ''))
+                    if 'vs.' in matchup:
+                        home_row = row
+                    elif '@' in matchup:
+                        away_row = row
+
+                if home_row is None or away_row is None:
+                    continue
+
+                parsed_games.append(self._build_game_info(
+                    game_id,
+                    int(home_row['TEAM_ID']),
+                    int(away_row['TEAM_ID']),
+                    str(home_row.get('GAME_DATE', date))
+                ))
+
+            return parsed_games
+        except Exception as e:
+            print(f"Error obteniendo partidos desde LeagueGameFinder para {date}: {e}")
+            return []
         
     def get_todays_games(self, date: str = None) -> List[Dict]:
         """
@@ -92,51 +256,31 @@ class NBADataClient:
             - away_team_id: ID del equipo visitante
         """
         try:
-            # Si no se especifica fecha, usar la actual
+            # Si no se especifica fecha, usar el día actual en hora de Nueva York.
             if date is None:
-                date = datetime.now().strftime('%Y-%m-%d')
+                date = self._get_default_game_date()
+
+            if date in self._games_cache:
+                return self._games_cache[date]
             
             print(f"📅 Buscando partidos para: {date}")
             
-            # Usamos ScoreboardV2 para todas las fechas (pasadas, presentes y futuras)
-            # El endpoint 'scoreboard' (live) a veces devuelve lista vacía temprano en el día
-            board = scoreboardv2.ScoreboardV2(game_date=date)
-            games_header = board.game_header.get_dict()
-            
-            # Mapa de equipos para buscar nombres por ID
-            teams_map = {t['id']: t for t in self.teams_data}
-            
             todays_games = []
-            
-            # Indices de columnas en GameHeader
-            headers = games_header['headers']
-            if not games_header['data']:
-                return []
-                
-            idx_game_id = headers.index('GAME_ID')
-            idx_home_id = headers.index('HOME_TEAM_ID')
-            idx_away_id = headers.index('VISITOR_TEAM_ID')
-            idx_status = headers.index('GAME_STATUS_TEXT')
-            
-            for row in games_header['data']:
-                home_id = row[idx_home_id]
-                away_id = row[idx_away_id]
-                
-                home_team_info = teams_map.get(home_id, {})
-                away_team_info = teams_map.get(away_id, {})
-                
-                game_info = {
-                    'game_id': row[idx_game_id],
-                    'home_team': home_team_info.get('nickname', 'Unknown'), # Usamos nickname (ej. Lakers) para consistencia
-                    'away_team': away_team_info.get('nickname', 'Unknown'),
-                    'game_time': row[idx_status],
-                    'home_team_id': home_id,
-                    'away_team_id': away_id,
-                    'home_team_tricode': home_team_info.get('abbreviation', ''),
-                    'away_team_tricode': away_team_info.get('abbreviation', '')
-                }
-                todays_games.append(game_info)
-            
+
+            # Para el día actual, primero intentamos el scoreboard live.
+            if date == self._get_default_game_date():
+                todays_games = self._get_games_from_live_scoreboard(date)
+
+            # Si el live scoreboard no trae nada, caemos a ScoreboardV2.
+            if not todays_games:
+                todays_games = self._get_games_from_scoreboard_v2(date)
+
+            # Último fallback: LeagueGameFinder, útil cuando los calendarios de playoff
+            # tardan en reflejarse en los endpoints de scoreboard.
+            if not todays_games:
+                todays_games = self._get_games_from_league_game_finder(date)
+
+            self._games_cache[date] = todays_games
             return todays_games
             
         except Exception as e:
@@ -151,6 +295,13 @@ class NBADataClient:
             DataFrame con columnas: PLAYER_NAME, Current_Status, Comment
         """
         try:
+            cache_ttl_seconds = 600
+            now_ts = time.time()
+            cached_df = self._injury_report_cache.get('data')
+            cached_ts = self._injury_report_cache.get('timestamp', 0.0)
+            if isinstance(cached_df, pd.DataFrame) and not cached_df.empty and (now_ts - cached_ts) < cache_ttl_seconds:
+                return cached_df
+
             print("🏥 Consultando reporte de lesiones (ESPN)...")
             url = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
             resp = requests.get(url, timeout=10)
@@ -208,9 +359,18 @@ class NBADataClient:
             if injured_players:
                 df = pd.DataFrame(injured_players)
                 print(f"✅ {len(df)} jugadores lesionados encontrados.")
+                self._injury_report_cache = {
+                    'timestamp': now_ts,
+                    'data': df
+                }
                 return df
             
-            return pd.DataFrame()
+            empty_df = pd.DataFrame()
+            self._injury_report_cache = {
+                'timestamp': now_ts,
+                'data': empty_df
+            }
+            return empty_df
             
         except Exception as e:
             print(f"Info: No se pudo obtener reporte de lesiones detallado: {e}")

@@ -7,12 +7,31 @@ Expone endpoints REST para obtener partidos, análisis y predicciones.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from functools import lru_cache
 from typing import List, Dict, Optional
 from datetime import datetime
+import pandas as pd
 import uvicorn
 
 from api_client import NBADataClient
 from engine import NBAPredictionEngine
+
+
+def _season_from_date(date_str: Optional[str]) -> str:
+    """Calcula temporada NBA (YYYY-YY) a partir de una fecha ISO; cae a temporada actual si falla."""
+    if not date_str:
+        return nba_client.current_season
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        if dt.month >= 10:
+            start_year = dt.year
+            end_year = (dt.year + 1) % 100
+        else:
+            start_year = dt.year - 1
+            end_year = dt.year % 100
+        return f"{start_year}-{end_year:02d}"
+    except Exception:
+        return nba_client.current_season
 
 # Inicializar FastAPI
 app = FastAPI(
@@ -33,6 +52,223 @@ app.add_middleware(
 # Inicializar clientes
 nba_client = NBADataClient()
 prediction_engine = NBAPredictionEngine()
+
+
+@lru_cache(maxsize=128)
+def _get_team_stats_cached(team_id: int, season: str) -> Dict:
+    from nba_api.stats.endpoints import leaguedashteamstats
+    import time
+
+    time.sleep(0.6)
+
+    stats = leaguedashteamstats.LeagueDashTeamStats(
+        season=season,
+        per_mode_detailed='PerGame'
+    )
+
+    df = stats.get_data_frames()[0]
+    team_stats = df[df['TEAM_ID'] == team_id]
+
+    if team_stats.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Equipo {team_id} no encontrado"
+        )
+
+    row = team_stats.iloc[0]
+
+    return {
+        "team_id": team_id,
+        "team_name": row.get('TEAM_NAME', 'Unknown'),
+        "wins": int(row.get('W', 0)),
+        "losses": int(row.get('L', 0)),
+        "win_pct": round(float(row.get('W_PCT', 0)), 3),
+        "pts_per_game": round(float(row.get('PTS', 0)), 1),
+        "reb_per_game": round(float(row.get('REB', 0)), 1),
+        "ast_per_game": round(float(row.get('AST', 0)), 1),
+        "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
+        "fg3_pct": round(float(row.get('FG3_PCT', 0)), 3),
+        "pts_allowed": round(float(row.get('PTS', 0)), 1),
+        "season": season,
+    }
+
+
+@lru_cache(maxsize=256)
+def _get_team_recent_games_cached(team_id: int, last_n: int, as_of_date: str, season: str) -> Dict:
+    from nba_api.stats.endpoints import teamgamelogs
+    import time
+
+    time.sleep(0.6)
+
+    game_logs = teamgamelogs.TeamGameLogs(
+        season_nullable=season,
+        team_id_nullable=team_id
+    )
+
+    df = game_logs.get_data_frames()[0]
+    if df.empty:
+        return {"team_id": team_id, "games": [], "total": 0}
+
+    if 'GAME_DATE' in df.columns:
+        df = df.copy()
+        df['GAME_DATE_DT'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
+        if as_of_date:
+            cutoff = pd.to_datetime(as_of_date, errors='coerce')
+            if pd.notna(cutoff):
+                df = df[df['GAME_DATE_DT'].notna() & (df['GAME_DATE_DT'] < cutoff)]
+        df = df.sort_values('GAME_DATE_DT', ascending=False)
+
+    recent = df.head(last_n)
+
+    games = []
+    for _, row in recent.iterrows():
+        result = "W" if row['WL'] == 'W' else "L"
+        pts_for = int(row.get('PTS', 0))
+        plus_minus = int(row.get('PLUS_MINUS', 0))
+        pts_against = pts_for - plus_minus
+
+        games.append({
+            "game_id": row.get('Game_ID', ''),
+            "date": row.get('GAME_DATE', ''),
+            "matchup": row.get('MATCHUP', ''),
+            "result": f"{result} {pts_for}-{pts_against}",
+            "pts": pts_for,
+            "reb": int(row.get('REB', 0)),
+            "ast": int(row.get('AST', 0)),
+            "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
+            "fg3m": int(row.get('FG3M', 0)),
+            "to": int(row.get('TOV', 0))
+        })
+
+    return {"team_id": team_id, "games": games, "total": len(games)}
+
+
+@lru_cache(maxsize=256)
+def _get_h2h_history_cached(home_team_id: int, away_team_id: int, last_n: int, as_of_date: str, season: str) -> Dict:
+    from nba_api.stats.endpoints import leaguegamefinder
+    import time
+
+    time.sleep(0.6)
+
+    game_finder = leaguegamefinder.LeagueGameFinder(
+        season_nullable=season,
+        team_id_nullable=home_team_id
+    )
+
+    df = game_finder.get_data_frames()[0]
+    if df.empty:
+        return {
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "matchups": [],
+            "away_wins": 0,
+            "home_wins": 0,
+            "total_matchups": 0,
+        }
+
+    teams_map = {t['id']: t for t in nba_client.teams_data}
+    home_abbr = teams_map.get(home_team_id, {}).get('abbreviation', '').upper()
+    away_abbr = teams_map.get(away_team_id, {}).get('abbreviation', '').upper()
+
+    if 'GAME_DATE' in df.columns:
+        df = df.copy()
+        df['GAME_DATE_DT'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
+        if as_of_date:
+            cutoff = pd.to_datetime(as_of_date, errors='coerce')
+            if pd.notna(cutoff):
+                df = df[df['GAME_DATE_DT'].notna() & (df['GAME_DATE_DT'] < cutoff)]
+        df = df.sort_values('GAME_DATE_DT', ascending=False)
+
+    if 'OPPONENT_TEAM_ID' in df.columns:
+        h2h = df[df['OPPONENT_TEAM_ID'] == away_team_id].head(last_n)
+    elif away_abbr and 'MATCHUP' in df.columns:
+        h2h = df[df['MATCHUP'].astype(str).str.contains(away_abbr, na=False)].head(last_n)
+    else:
+        h2h = df.head(0)
+
+    if h2h.empty:
+        return {
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "matchups": [],
+            "away_wins": 0,
+            "home_wins": 0,
+            "total_matchups": 0,
+        }
+
+    away_reb_by_game = {}
+    away_finder = leaguegamefinder.LeagueGameFinder(
+        season_nullable=season,
+        team_id_nullable=away_team_id
+    )
+    away_df = away_finder.get_data_frames()[0]
+    if not away_df.empty:
+        if 'GAME_DATE' in away_df.columns:
+            away_df = away_df.copy()
+            away_df['GAME_DATE_DT'] = pd.to_datetime(away_df['GAME_DATE'], errors='coerce')
+            if as_of_date:
+                cutoff = pd.to_datetime(as_of_date, errors='coerce')
+                if pd.notna(cutoff):
+                    away_df = away_df[away_df['GAME_DATE_DT'].notna() & (away_df['GAME_DATE_DT'] < cutoff)]
+
+        if 'OPPONENT_TEAM_ID' in away_df.columns:
+            away_h2h = away_df[away_df['OPPONENT_TEAM_ID'] == home_team_id]
+        elif home_abbr and 'MATCHUP' in away_df.columns:
+            away_h2h = away_df[away_df['MATCHUP'].astype(str).str.contains(home_abbr, na=False)]
+        else:
+            away_h2h = away_df.head(0)
+
+        for _, away_row in away_h2h.iterrows():
+            away_game_id = away_row.get('GAME_ID') or away_row.get('Game_ID')
+            if away_game_id:
+                away_reb_by_game[str(away_game_id)] = int(away_row.get('REB', 0))
+
+    matchups = []
+    away_wins = 0
+    home_wins = 0
+
+    for _, row in h2h.iterrows():
+        result = "W" if row['WL'] == 'W' else "L"
+        if result == "W":
+            home_wins += 1
+        else:
+            away_wins += 1
+
+        matchup_text = str(row.get('MATCHUP', ''))
+        if 'vs.' in matchup_text:
+            location = "HOME"
+        elif '@' in matchup_text:
+            location = "AWAY"
+        else:
+            location = "UNKNOWN"
+
+        pts_for = int(row.get('PTS', 0))
+        plus_minus = int(row.get('PLUS_MINUS', 0))
+        pts_against = pts_for - plus_minus
+        home_reb = int(row.get('REB', 0))
+        game_id = row.get('GAME_ID') or row.get('Game_ID')
+        away_reb = away_reb_by_game.get(str(game_id)) if game_id else None
+
+        matchups.append({
+            "date": row.get('GAME_DATE', ''),
+            "matchup": matchup_text,
+            "result": result,
+            "pts_for": pts_for,
+            "pts_against": pts_against,
+            "reb_home": home_reb,
+            "reb_away": away_reb,
+            "location": location,
+        })
+
+    return {
+        "home_team_id": home_team_id,
+        "away_team_id": away_team_id,
+        "matchups": matchups,
+        "away_wins": away_wins,
+        "home_wins": home_wins,
+        "total_matchups": len(matchups),
+        "away_win_pct": round(away_wins / len(matchups) * 100, 1) if matchups else 0,
+    }
 
 
 # Modelos Pydantic para validación de datos
@@ -384,41 +620,7 @@ async def get_team_stats(team_id: int):
         Estadísticas ofensivas, defensivas y generales del equipo
     """
     try:
-        from nba_api.stats.endpoints import leaguedashteamstats
-        import time
-        
-        time.sleep(0.6)
-        
-        stats = leaguedashteamstats.LeagueDashTeamStats(
-            season=nba_client.current_season,
-            per_mode_detailed='PerGame'
-        )
-        
-        df = stats.get_data_frames()[0]
-        team_stats = df[df['TEAM_ID'] == team_id]
-        
-        if team_stats.empty:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Equipo {team_id} no encontrado"
-            )
-        
-        row = team_stats.iloc[0]
-        
-        return {
-            "team_id": team_id,
-            "team_name": row.get('TEAM_NAME', 'Unknown'),
-            "wins": int(row.get('W', 0)),
-            "losses": int(row.get('L', 0)),
-            "win_pct": round(float(row.get('W_PCT', 0)), 3),
-            "pts_per_game": round(float(row.get('PTS', 0)), 1),
-            "reb_per_game": round(float(row.get('REB', 0)), 1),
-            "ast_per_game": round(float(row.get('AST', 0)), 1),
-            "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
-            "fg3_pct": round(float(row.get('FG3_PCT', 0)), 3),
-            "pts_allowed": round(float(row.get('PTS', 0)), 1),  # Aprox, requeriría endpoint defensivo
-            "season": nba_client.current_season
-        }
+        return _get_team_stats_cached(team_id, nba_client.current_season)
         
     except HTTPException:
         raise
@@ -430,7 +632,7 @@ async def get_team_stats(team_id: int):
  
  
 @app.get("/api/team/{team_id}/recent-games")
-async def get_team_recent_games(team_id: int, last_n: int = 5):
+async def get_team_recent_games(team_id: int, last_n: int = 5, as_of_date: str = None):
     """
     Obtiene los últimos N partidos de un equipo.
     
@@ -442,50 +644,8 @@ async def get_team_recent_games(team_id: int, last_n: int = 5):
         Lista de diccionarios con información de los últimos partidos
     """
     try:
-        from nba_api.stats.endpoints import teamgamelogs
-        import time
-        
-        time.sleep(0.6)
-        
-        game_logs = teamgamelogs.TeamGameLogs(
-            season_nullable=nba_client.current_season,
-            team_id_nullable=team_id
-        )
-        
-        df = game_logs.get_data_frames()[0]
-        
-        if df.empty:
-            return {"team_id": team_id, "games": []}
-        
-        # Tomar los últimos N partidos
-        recent = df.head(last_n)
-        
-        games = []
-        for _, row in recent.iterrows():
-            # Determinar W/L
-            result = "W" if row['WL'] == 'W' else "L"
-            pts_for = int(row.get('PTS', 0))
-            plus_minus = int(row.get('PLUS_MINUS', 0))
-            pts_against = pts_for - plus_minus
-            
-            games.append({
-                "game_id": row.get('Game_ID', ''),
-                "date": row.get('GAME_DATE', ''),
-                "matchup": row.get('MATCHUP', ''),
-                "result": f"{result} {pts_for}-{pts_against}",
-                "pts": pts_for,
-                "reb": int(row.get('REB', 0)),
-                "ast": int(row.get('AST', 0)),
-                "fg_pct": round(float(row.get('FG_PCT', 0)), 3),
-                "fg3m": int(row.get('FG3M', 0)),
-                "to": int(row.get('TOV', 0))
-            })
-        
-        return {
-            "team_id": team_id,
-            "games": games,
-            "total": len(games)
-        }
+        target_season = _season_from_date(as_of_date)
+        return _get_team_recent_games_cached(team_id, last_n, as_of_date or "", target_season)
         
     except Exception as e:
         raise HTTPException(
@@ -495,7 +655,7 @@ async def get_team_recent_games(team_id: int, last_n: int = 5):
  
  
 @app.get("/api/h2h")
-async def get_h2h_history(home_team_id: int, away_team_id: int, last_n: int = 10):
+async def get_h2h_history(home_team_id: int, away_team_id: int, last_n: int = 10, as_of_date: str = None):
     """
     Obtiene el historial de enfrentamientos (H2H) entre dos equipos.
     
@@ -508,93 +668,8 @@ async def get_h2h_history(home_team_id: int, away_team_id: int, last_n: int = 10
         Historial H2H con resultados y estadísticas
     """
     try:
-        from nba_api.stats.endpoints import leaguegamefinder
-        import time
-        
-        time.sleep(0.6)
-        
-        # Obtener todos los partidos del equipo local
-        game_finder = leaguegamefinder.LeagueGameFinder(
-            season_nullable=nba_client.current_season,
-            team_id_nullable=home_team_id
-        )
-        
-        df = game_finder.get_data_frames()[0]
-        if df.empty:
-            return {
-                "home_team_id": home_team_id,
-                "away_team_id": away_team_id,
-                "matchups": [],
-                "away_wins": 0,
-                "home_wins": 0,
-                "total_matchups": 0
-            }
-
-        teams_map = {t['id']: t for t in nba_client.teams_data}
-        away_abbr = teams_map.get(away_team_id, {}).get('abbreviation', '').upper()
-        
-        # Filtrar H2H de forma robusta: preferir OPPONENT_TEAM_ID si existe,
-        # de lo contrario usar MATCHUP + abreviatura del rival.
-        if 'OPPONENT_TEAM_ID' in df.columns:
-            h2h = df[df['OPPONENT_TEAM_ID'] == away_team_id].head(last_n)
-        elif away_abbr and 'MATCHUP' in df.columns:
-            h2h = df[df['MATCHUP'].astype(str).str.contains(away_abbr, na=False)].head(last_n)
-        else:
-            h2h = df.head(0)
-        
-        if h2h.empty:
-            return {
-                "home_team_id": home_team_id,
-                "away_team_id": away_team_id,
-                "matchups": [],
-                "away_wins": 0,
-                "home_wins": 0,
-                "total_matchups": 0
-            }
-        
-        matchups = []
-        away_wins = 0
-        home_wins = 0
-        
-        for _, row in h2h.iterrows():
-            result = "W" if row['WL'] == 'W' else "L"
-            
-            # El DataFrame está en la perspectiva del equipo local (home_team_id)
-            if result == "W":
-                home_wins += 1
-            else:
-                away_wins += 1
-
-            matchup_text = str(row.get('MATCHUP', ''))
-            if 'vs.' in matchup_text:
-                location = "HOME"
-            elif '@' in matchup_text:
-                location = "AWAY"
-            else:
-                location = "UNKNOWN"
-
-            pts_for = int(row.get('PTS', 0))
-            plus_minus = int(row.get('PLUS_MINUS', 0))
-            pts_against = pts_for - plus_minus
-            
-            matchups.append({
-                "date": row.get('GAME_DATE', ''),
-                "matchup": matchup_text,
-                "result": result,
-                "pts_for": pts_for,
-                "pts_against": pts_against,
-                "location": location
-            })
-        
-        return {
-            "home_team_id": home_team_id,
-            "away_team_id": away_team_id,
-            "matchups": matchups,
-            "away_wins": away_wins,
-            "home_wins": home_wins,
-            "total_matchups": len(matchups),
-            "away_win_pct": round(away_wins / len(matchups) * 100, 1) if matchups else 0
-        }
+        target_season = _season_from_date(as_of_date)
+        return _get_h2h_history_cached(home_team_id, away_team_id, last_n, as_of_date or "", target_season)
         
     except Exception as e:
         raise HTTPException(
@@ -604,7 +679,7 @@ async def get_h2h_history(home_team_id: int, away_team_id: int, last_n: int = 10
  
  
 @app.get("/api/game/{game_id}/preview")
-async def get_game_preview(game_id: str):
+async def get_game_preview(game_id: str, date: str = None):
     """
     Obtiene una vista previa completa del partido con estadísticas de ambos equipos.
     
@@ -616,7 +691,7 @@ async def get_game_preview(game_id: str):
     """
     try:
         # Obtener info del partido
-        games = nba_client.get_todays_games()
+        games = nba_client.get_todays_games(date=date)
         target_game = next((g for g in games if g['game_id'] == game_id), None)
         
         if not target_game:
@@ -627,17 +702,25 @@ async def get_game_preview(game_id: str):
         
         home_id = target_game['home_team_id']
         away_id = target_game['away_team_id']
+        target_season = _season_from_date(date)
+        target_as_of_date = date or ""
         
-        # Obtener estadísticas de ambos equipos
-        home_stats_resp = await get_team_stats(home_id)
-        away_stats_resp = await get_team_stats(away_id)
-        
-        # Obtener últimos partidos
-        home_recent_resp = await get_team_recent_games(home_id, last_n=5)
-        away_recent_resp = await get_team_recent_games(away_id, last_n=5)
-        
-        # Obtener H2H
-        h2h_resp = await get_h2h_history(home_id, away_id, last_n=10)
+        # Obtener datos consolidados usando cachés locales
+        home_stats_resp = _get_team_stats_cached(home_id, target_season)
+        away_stats_resp = _get_team_stats_cached(away_id, target_season)
+        home_recent_resp = _get_team_recent_games_cached(home_id, 5, target_as_of_date, target_season)
+        away_recent_resp = _get_team_recent_games_cached(away_id, 5, target_as_of_date, target_season)
+        h2h_resp = _get_h2h_history_cached(home_id, away_id, 10, target_as_of_date, target_season)
+        injury_df = nba_client.get_injury_report()
+        game_injuries = []
+        if not injury_df.empty:
+            home_team = target_game['home_team']
+            away_team = target_game['away_team']
+            relevant_injuries = injury_df[
+                injury_df['TEAM_NAME'].str.contains(home_team, case=False, na=False) |
+                injury_df['TEAM_NAME'].str.contains(away_team, case=False, na=False)
+            ]
+            game_injuries = relevant_injuries.to_dict('records')
         
         return {
             "game_id": game_id,
@@ -652,6 +735,7 @@ async def get_game_preview(game_id: str):
             "home_recent_games": home_recent_resp.get('games', []),
             "away_recent_games": away_recent_resp.get('games', []),
             "h2h": h2h_resp,
+            "injuries": game_injuries,
             "preview_timestamp": datetime.now().isoformat()
         }
         

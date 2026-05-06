@@ -15,15 +15,15 @@ import html
 from typing import Dict, List, Optional
 import os
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 load_dotenv()
 
+PAGE_ICON_URL = "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f3c0.png?v=1"
 
 # Configuración de la página
 st.set_page_config(
     page_title="NBA Betting Analyzer Pro",
-    page_icon="🏀",
+    page_icon=PAGE_ICON_URL,
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -100,6 +100,17 @@ st.markdown("""
         color: var(--nba-gold);
         text-transform: uppercase;
         margin-bottom: 0.4rem;
+    }
+    .main-header-title-row {
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        gap: 0.45rem;
+    }
+    .main-header-emoji {
+        font-size: clamp(2.2rem, 5.4vw, 4.3rem);
+        line-height: 1;
+        filter: drop-shadow(0 4px 10px rgba(0,0,0,0.35));
     }
     .main-header-title {
         font-family: 'Bebas Neue', sans-serif;
@@ -690,6 +701,7 @@ def check_backend_health() -> bool:
         return False
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_todays_games(date: str = None) -> List[Dict]:
     """Obtiene los partidos del día desde el backend."""
     try:
@@ -709,6 +721,7 @@ def get_todays_games(date: str = None) -> List[Dict]:
         return []
 
 
+@st.cache_data(ttl=180, show_spinner=False)
 def analyze_game(game_id: str, date: str = None) -> Dict:
     """Solicita el análisis completo de un partido al backend."""
     try:
@@ -732,6 +745,7 @@ def analyze_game(game_id: str, date: str = None) -> Dict:
         return {}
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_live_game_stats(game_id: str) -> Dict:
     """Obtiene estadísticas en tiempo real de un partido."""
     try:
@@ -746,8 +760,9 @@ def get_live_game_stats(game_id: str) -> Dict:
         return {}
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_player_gamelog(player_id: int) -> List[Dict]:
-    """Obtiene los últimos 5 partidos de un jugador."""
+    """Obtiene los últimos 10 partidos de un jugador."""
     try:
         response = requests.get(
             f"{BACKEND_URL}/api/player/{player_id}",
@@ -781,7 +796,11 @@ def format_bet_direction(direction: str) -> str:
         return "⚠️ NO BET"
 
 
-def format_game_time(game_time_str: str, game_status: str = None) -> str:
+def format_game_time(
+    game_time_str: str,
+    game_status: str = None,
+    display_date: Optional[str] = None,
+) -> str:
     """
     Convierte la hora del partido a hora de Colombia (COT, UTC-5).
     
@@ -809,8 +828,12 @@ def format_game_time(game_time_str: str, game_status: str = None) -> str:
 
         # Convertir a Colombia
         col_time = et_time.astimezone(col_zone)
+        if display_date and display_date != col_time.strftime('%Y-%m-%d'):
+            return f"{display_date[8:10]}/{display_date[5:7]}/{display_date[0:4]} {col_time.strftime('%I:%M %p COT')}"
         return col_time.strftime('%d/%m/%Y %I:%M %p COT')
     except Exception:
+        if display_date:
+            return display_date
         return game_status or game_time_str
 
 
@@ -889,9 +912,9 @@ def style_nba_table(df: pd.DataFrame, format_map: Optional[Dict[str, str]] = Non
     return styler
 
 
-def display_game_card(game: Dict):
+def display_game_card(game: Dict, selected_date: Optional[str] = None):
     """Muestra una tarjeta visual para un partido."""
-    formatted_time = format_game_time(game.get('game_time', 'TBD'), game.get('game_status'))
+    formatted_time = format_game_time(game.get('game_time', 'TBD'), game.get('game_status'), selected_date)
     away_logo = get_team_logo_url(game.get('away_team_id'))
     home_logo = get_team_logo_url(game.get('home_team_id'))
     game_id = game.get('game_id') or game.get('id') or "N/A"
@@ -983,93 +1006,44 @@ def display_bet_suggestion(bet: Dict, rank: int):
         st.metric("Calidad", bet_quality)
 
 
-def generate_gemini_analysis(game_data: Dict) -> str:
-    """
-    Análisis táctico del partido usando Google Gemini API.
-    Requiere: GOOGLE_API_KEY en variables de entorno
-    """
-    try:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            return "⚠️ API key de Gemini no configurada. Configura GOOGLE_API_KEY en .env"
-        
-        genai.configure(api_key=api_key)
+def _build_local_tactical_summary(game_data: Dict, analysis: Optional[Dict] = None) -> str:
+    """Genera un resumen táctico local sin usar IA."""
+    analysis = analysis or {}
+    home = game_data.get('home_team', 'Home')
+    away = game_data.get('away_team', 'Away')
+    best_bets = analysis.get('best_bets', []) or []
+    top_bets = best_bets[:5]
 
-        # Selección dinámica de modelo compatible
-        selected_model = None
-        try:
-            models = list(genai.list_models())
-            # Filtrar modelos que soportan generateContent
-            candidates = [
-                m for m in models
-                if hasattr(m, 'supported_generation_methods')
-                and 'generateContent' in m.supported_generation_methods
-            ]
-            # Prioridad por versiones más nuevas
-            preferred_order = [
-                'gemini-1.5-flash-latest',
-                'gemini-1.5-pro-latest',
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-                'gemini-1.0-pro',
-                'gemini-pro'
-            ]
-            # Mapear nombres disponibles
-            available_names = [
-                (getattr(m, 'name', '') or '')
-                .replace('models/','') for m in candidates
-            ]
-            for name in preferred_order:
-                if name in available_names:
-                    selected_model = name
-                    break
-        except Exception:
-            # Si falla el listado, usar fallback
-            selected_model = 'gemini-1.5-flash'
+    summary_lines = [
+        f"## 📊 Resumen Táctico (Basado en Datos)",
+        f"", 
+        f"### Partido: {away} vs {home}",
+        f"", 
+        f"### Factores Clave",
+        f"1. **Forma reciente:** Usa los últimos juegos y la tendencia de cada equipo.",
+        f"2. **Ritmo y defensa:** Revisa la combinación entre ataque del rival y defensa propia.",
+        f"3. **Lesiones y carga:** Considera ausencias y fatiga acumulada.",
+        f"", 
+        f"### Mejores oportunidades detectadas",
+    ]
 
-        if not selected_model:
-            selected_model = 'gemini-1.5-flash'
-
-        model = genai.GenerativeModel(selected_model)
-        
-        home = game_data.get('home_team', 'Home')
-        away = game_data.get('away_team', 'Away')
-        
-        prompt = f"""
-        Proporciona un análisis táctico breve y profesional (máximo 300 palabras) del partido:
-        {away} vs {home} en la NBA.
-        
-        Incluye:
-        1. Matchups clave (1-2 comparaciones)
-        2. Factores principales que afectarán el juego (ritmo, defensa, lesiones)
-        3. Predicción general del resultado
-        
-        Formato: usa markdown con listas cortas.
-        """
-        
-        response = model.generate_content(prompt)
-        # Verificar si hay contenido
-        if response and hasattr(response, 'text'):
-            return response.text
-        elif response and hasattr(response, 'parts'):
-            return ''.join(part.text for part in response.parts)
-        else:
-            return "⚠️ No se recibió respuesta de Gemini"
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "404" in error_msg or "not found" in error_msg.lower():
-            return (
-                "❌ Error al conectar con Gemini: " + error_msg + "\n\n"
-                "Sugerencias:\n"
-                "- Actualiza el paquete: pip install --upgrade google-generativeai\n"
-                "- Usa modelos: gemini-1.5-flash-latest o gemini-1.5-pro-latest\n"
-                "- Verifica tu API key en .env (GOOGLE_API_KEY)\n"
+    if top_bets:
+        for idx, bet in enumerate(top_bets, 1):
+            summary_lines.append(
+                f"{idx}. {bet.get('player_name', 'Jugador')} - {bet.get('stat_type', 'Stat')} | "
+                f"proyección {bet.get('projection', 'N/A')} | línea {bet.get('suggested_line', 'N/A')} | "
+                f"confianza {bet.get('confidence', 'N/A')}%"
             )
-        return (
-            "❌ Error al obtener análisis de Gemini: " + error_msg + "\n\n"
-            "Verifica tu conexión a internet y que la API key sea válida."
-        )
+    else:
+        summary_lines.append("No hay oportunidades suficientes para resumir.")
+
+    summary_lines.extend([
+        f"", 
+        f"### Recomendación",
+        f"Prioriza las jugadas con mayor confianza y mejor diferencia entre proyección y línea. Evita forzar picks si la ventaja es pequeña.",
+    ])
+
+    return "\n".join(summary_lines)
 
 
 def main():
@@ -1079,7 +1053,10 @@ def main():
     st.markdown("""
     <div class="main-header-wrap">
         <div class="main-header-eyebrow">Advanced Analytics · Betting Intelligence</div>
-        <div class="main-header-title">🏀 NBA Betting Analyzer Pro</div>
+        <div class="main-header-title-row">
+            <span class="main-header-emoji">🏀</span>
+            <div class="main-header-title">NBA Betting Analyzer Pro</div>
+        </div>
         <div class="main-header-accent"></div>
     </div>
     """, unsafe_allow_html=True)
@@ -1144,7 +1121,7 @@ def main():
         return
     
     # Mostrar resumen de partidos
-    st.subheader(f"📅 Partidos de Hoy ({len(games)} encuentros)")
+    st.subheader(f"📅 Partidos de {date_str or 'Hoy'} ({len(games)} encuentros)")
     
     # Selector de partido
     game_options = {
@@ -1163,7 +1140,7 @@ def main():
         
         # Mostrar info del partido seleccionado
         st.markdown("---")
-        display_game_card(selected_game)
+        display_game_card(selected_game, selected_date=date_str)
         
         # Botón de análisis
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -1185,11 +1162,10 @@ def main():
             if analysis and analysis.get('best_bets'):
                 st.success(f"✅ Análisis completado. Se encontraron {analysis['total_opportunities']} oportunidades de valor.")
                 
-                # Tabs para organizar información
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                # Tabs para organizar información (se eliminó la pestaña de análisis táctico)
+                tab1, tab2, tab3, tab4 = st.tabs([
                     "🎯 Mejores Apuestas",
                     "📊 Todas las Oportunidades",
-                    "🤖 Análisis Táctico",
                     "🏥 Reporte de Lesiones",
                     "🔴 Live Tracker"
                 ])
@@ -1269,7 +1245,7 @@ def main():
                         )
                         
                         st.markdown("---")
-                        st.subheader("🔍 Detalle de Jugador (Últimos 5 Partidos)")
+                        st.subheader("🔍 Detalle de Jugador (Últimos 10 Partidos)")
                         
                         # Selector de jugador para ver detalles
                         # Crear opciones legibles
@@ -1304,28 +1280,50 @@ def main():
                                         # Filtrar solo las que existen
                                         cols_to_show = [c for c in cols_to_show if c in gamelog_df.columns]
 
-                                        gamelog_table = gamelog_df[cols_to_show]
-                                        styled_gamelog = style_nba_table(
-                                            gamelog_table,
-                                            format_map={'FG_PCT': '{:.1%}'}
+                                        gamelog_table = gamelog_df[cols_to_show].copy()
+
+                                        # Formatear fecha: YYYY-MM-DD
+                                        if 'GAME_DATE' in gamelog_table.columns:
+                                            parsed_dates = pd.to_datetime(gamelog_table['GAME_DATE'], errors='coerce')
+                                            gamelog_table['GAME_DATE'] = parsed_dates.dt.strftime('%Y-%m-%d').fillna('')
+
+                                        # Redondear minutos
+                                        if 'MIN' in gamelog_table.columns:
+                                            gamelog_table['MIN'] = pd.to_numeric(gamelog_table['MIN'], errors='coerce').round(0)
+
+                                        # Encabezados en español
+                                        gamelog_rename_map = {
+                                            'GAME_DATE': 'FECHA',
+                                            'MATCHUP': 'ENFRENTAMIENTO',
+                                            'WL': 'RESULTADO',
+                                            'MIN': 'MINUTOS',
+                                            'PRA': 'PRA',
+                                            'PTS': 'PTS',
+                                            'REB': 'REB',
+                                            'AST': 'AST',
+                                            'FG3M': 'TRIPLES',
+                                            'FG_PCT': 'FG%'
+                                        }
+                                        gamelog_table = gamelog_table.rename(columns={
+                                            k: v for k, v in gamelog_rename_map.items() if k in gamelog_table.columns
+                                        })
+
+                                        st.markdown(
+                                            render_bootstrap_table(
+                                                gamelog_table,
+                                                format_map={'FG%': '{:.1%}', 'MINUTOS': '{:.0f}'}
+                                            ),
+                                            unsafe_allow_html=True
                                         )
-                                        
-                                        st.markdown(render_bootstrap_table(gamelog_table, format_map={'FG_PCT': '{:.1%}'}), unsafe_allow_html=True)
                                     else:
                                         st.warning("No se encontraron datos recientes para este jugador.")
                             else:
                                 st.error("No se pudo identificar el ID del jugador.")
                 
-                with tab3:
-                    st.subheader("🤖 Análisis Táctico con IA")
-                    
-                    with st.spinner("Generando análisis con Gemini..."):
-                        time.sleep(1)  # Simular tiempo de procesamiento
-                        gemini_analysis = generate_gemini_analysis(selected_game)
-                    
-                    st.markdown(gemini_analysis)
+                # 'Análisis Táctico' eliminado: el resumen táctico local queda accesible
+                # desde el detalle general o se puede reconstruir fuera de una pestaña dedicada.
                 
-                with tab4:
+                with tab3:
                     st.subheader("🏥 Reporte de Lesiones")
                     
                     injuries = analysis.get('injuries', [])
@@ -1352,7 +1350,7 @@ def main():
                         st.success("✅ No se reportan lesiones significativas para los equipos de este partido.")
 
 
-                with tab5:
+                with tab4:
                     st.subheader("🔴 Seguimiento en Vivo")
                     
                     col_refresh, _ = st.columns([1, 4])

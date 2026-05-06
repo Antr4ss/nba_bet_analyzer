@@ -24,10 +24,7 @@ Nueva funcionalidad que permite monitorear en tiempo real el progreso de tus apu
 ### 3. 🏥 Reporte de Lesiones Integrado
 Consulta automática de fuentes externas (ESPN) para filtrar jugadores lesionados o cuestionables, evitando recomendaciones sobre jugadores que no participarán.
 
-### 4. 🤖 Análisis Táctico con IA
-Integración con **Google Gemini** para generar análisis cualitativos sobre los enfrentamientos, claves del partido y factores intangibles que los números no capturan.
-
-### 5. 📉 Detección de Tendencias y Fatiga
+### 4. 📉 Detección de Tendencias y Fatiga
 - **Back-to-Back:** Identifica equipos que jugaron el día anterior y aplica penalizaciones por fatiga.
 - **Hot Streaks:** Detecta jugadores con tendencia al alza en sus últimos 5 partidos.
 
@@ -79,8 +76,31 @@ El proyecto está construido con una arquitectura moderna de microservicios:
 - **Datos:**
   - `nba_api`: Fuente oficial de estadísticas, calendarios y boxscores en vivo.
   - `requests`: Scraping de reportes de lesiones (ESPN).
-- **IA:** `google-generativeai`: Generación de análisis tácticos con modelos Gemini.
 - **Ciencia de Datos:** `pandas` y `numpy` para manipulación y cálculo vectorial.
+
+---
+
+## 🔐 Autenticación Institucional Oficial (OIDC)
+
+Para integraciones de identidad, evita automatizar formularios web de login. Usa el método oficial del proveedor de identidad (OIDC/SAML/API institucional).
+
+Este repositorio incluye un cliente OIDC oficial por Device Flow:
+
+```bash
+python official_oidc_client.py \
+   --well-known "https://TU_IDP/.well-known/openid-configuration" \
+   --client-id "TU_CLIENT_ID" \
+   --scope "openid profile email" \
+   --output oidc_result.json
+```
+
+Requisitos para que funcione:
+
+- `client_id` registrado oficialmente por el equipo de identidad.
+- Endpoint de discovery OIDC habilitado en la institución.
+- Device Authorization Grant habilitado por el IdP.
+
+Si tu IdP no habilita Device Flow, solicita Authorization Code + PKCE o la API oficial de identidad disponible en tu institución.
 
 ---
 
@@ -92,10 +112,7 @@ El proyecto está construido con una arquitectura moderna de microservicios:
    pip install -r requirements.txt
    ```
 3. **Configurar variables de entorno:**
-   Crear un archivo `.env` con tu API Key de Google Gemini:
-   ```
-   GOOGLE_API_KEY=tu_api_key_aqui
-   ```
+   Crear un archivo `.env` con las variables necesarias para apuestas y datos externos.
 4. **Iniciar el Backend:**
    ```bash
    uvicorn main:app --reload
