@@ -7,7 +7,7 @@ Maneja la sincronización diaria de partidos, estadísticas de jugadores y repor
 from nba_api.live.nba.endpoints import scoreboard, boxscore
 from nba_api.stats.endpoints import (
     leaguegamefinder, playergamelogs, commonplayerinfo,
-    leaguedashplayerstats, teamgamelogs, scoreboardv2, commonteamroster
+    leaguedashplayerstats, teamgamelogs, scoreboardv2, scoreboardv3, commonteamroster, boxscoretraditionalv2
 )
 from nba_api.stats.static import teams, players
 from datetime import datetime, timedelta
@@ -15,6 +15,7 @@ import pandas as pd
 import time
 import requests
 import unicodedata
+import re
 from typing import Dict, List, Optional
 
 
@@ -81,8 +82,13 @@ class NBADataClient:
             return pd.DataFrame()
 
     def _get_default_game_date(self) -> str:
-        """Devuelve la fecha actual en hora de Nueva York."""
-        return pd.Timestamp.now(tz='America/New_York').strftime('%Y-%m-%d')
+        """
+        Devuelve la fecha en hora de Nueva York (ET).
+        NBA publica horarios en ET, así que debe consultarse en esa zona.
+        """
+        # Convertir hora actual (cualquier zona) a ET
+        now_et = pd.Timestamp.now(tz='America/New_York')
+        return now_et.strftime('%Y-%m-%d')
 
     def _get_team_info_by_id(self, team_id: int) -> Dict:
         """Busca información estática de un equipo por ID."""
@@ -116,6 +122,213 @@ class NBADataClient:
             'away_team_tricode': away_team_info.get('abbreviation', '')
         }
 
+    def _normalize_game_time(self, date: Optional[str], raw_time: str) -> str:
+        """Normaliza game_time a ISO UTC cuando se puede, si no deja el texto original."""
+        if not raw_time:
+            return raw_time
+
+        time_text = str(raw_time).strip()
+
+        # Formato con hora ET (ej: "7:30 pm ET") usando la fecha solicitada.
+        if date and "ET" in time_text.upper():
+            try:
+                match = re.search(r"(\d{1,2}):(\d{2})\s*(am|pm)\s*ET", time_text, re.IGNORECASE)
+                if match:
+                    hour = int(match.group(1))
+                    minute = int(match.group(2))
+                    suffix = match.group(3).lower()
+                    if suffix == "pm" and hour != 12:
+                        hour += 12
+                    if suffix == "am" and hour == 12:
+                        hour = 0
+
+                    et_time = pd.Timestamp(f"{date} {hour:02d}:{minute:02d}", tz="America/New_York")
+                    return et_time.tz_convert("UTC").isoformat()
+            except Exception:
+                return raw_time
+
+        # Formatos ISO (con o sin offset). Si es naive, asumir UTC.
+        try:
+            dt_utc = pd.to_datetime(time_text, errors="coerce", utc=True)
+            if pd.notna(dt_utc):
+                return dt_utc.isoformat()
+        except Exception:
+            return raw_time
+
+        return raw_time
+
+    def _get_espn_time_map(self, date: str) -> Dict:
+        """Obtiene horarios desde ESPN y los indexa por (away_abbr, home_abbr)."""
+        time_map = {}
+        if not date:
+            return time_map
+
+        try:
+            compact_date = date.replace("-", "")
+            url = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+            resp = requests.get(url, params={"dates": compact_date}, timeout=8)
+            data = resp.json()
+
+            for event in data.get("events", []):
+                competitions = event.get("competitions", [])
+                if not competitions:
+                    continue
+                comp = competitions[0]
+                comp_date = comp.get("date") or event.get("date")
+                if not comp_date:
+                    continue
+
+                home_abbr = None
+                away_abbr = None
+                for competitor in comp.get("competitors", []):
+                    team = competitor.get("team", {})
+                    abbr = team.get("abbreviation")
+                    if competitor.get("homeAway") == "home":
+                        home_abbr = abbr
+                    elif competitor.get("homeAway") == "away":
+                        away_abbr = abbr
+
+                if home_abbr and away_abbr:
+                    time_map[(away_abbr.upper(), home_abbr.upper())] = comp_date
+
+        except Exception as e:
+            print(f"Info: No se pudo obtener horarios desde ESPN: {e}")
+
+        return time_map
+
+    def _get_games_from_static_api(self, date: str) -> List[Dict]:
+        """
+        Obtiene partidos desde la API estática de NBA.
+        Mejorado: Mejor manejo de errores y timeouts.
+        """
+        try:
+            import requests
+            
+            url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+            
+            # Intentar con timeout generoso
+            response = requests.get(url, timeout=15)
+            
+            # Verificar si la respuesta es válida (no siempre 200)
+            if response.status_code not in [200, 304]:
+                print(f"      API estática retornó código {response.status_code}")
+                return []
+            
+            data = response.json()
+            game_dates = data.get("leagueSchedule", {}).get("gameDates", [])
+            
+            if not game_dates:
+                return []
+            
+            from datetime import datetime as dt
+            date_obj = dt.strptime(date, "%Y-%m-%d")
+            target_date = date_obj.strftime("%m/%d/%Y 00:00:00")
+            
+            # Buscar el día con esos partidos
+            for day in game_dates:
+                if day.get("gameDate") == target_date:
+                    games = day.get("games", [])
+                    parsed_games = []
+                    
+                    for game in games:
+                        home_team = game.get("homeTeam", {})
+                        away_team = game.get("awayTeam", {})
+                        
+                        home_team_id = home_team.get("teamId")
+                        away_team_id = away_team.get("teamId")
+                        game_id = game.get("gameId")
+                        game_time_utc = self._normalize_game_time(date, game.get("gameDateTimeUTC", ""))
+                        
+                        if not game_id or home_team_id is None or away_team_id is None:
+                            continue
+                        
+                        parsed_games.append(self._build_game_info(
+                            game_id, 
+                            home_team_id, 
+                            away_team_id, 
+                            game_time_utc
+                        ))
+                    
+                    return parsed_games
+            
+            return []
+            
+        except requests.exceptions.Timeout:
+            print("      API estática: Timeout (>15s)")
+            return []
+        except requests.exceptions.ConnectionError:
+            print("      API estática: Error de conexión")
+            return []
+        except ValueError as e:  # JSON decode error
+            print(f"      API estática: Respuesta inválida ({str(e)[:30]}...)")
+            return []
+        except Exception as e:
+            print(f"      API estática: Error inesperado ({str(e)[:50]}...)")
+            return []
+
+    def _get_all_available(self, date: str) -> List[Dict]:
+        """
+        Obtiene partidos usando TODAS las APIs disponibles y combina resultados.
+        Útil cuando una API tiene datos parciales.
+        """
+        all_games = []
+        seen_game_ids = set()
+
+        apis = [
+            ("Estática", self._get_games_from_static_api),
+            ("Live", self._get_games_from_live_scoreboard),
+            ("V3", self._get_games_from_scoreboard_v2),
+            ("Finder", self._get_games_from_league_game_finder),
+        ]
+
+        for api_name, api_func in apis:
+            try:
+                games = api_func(date)
+                for game in games:
+                    game_id = game.get('game_id')
+                    if game_id not in seen_game_ids:
+                        all_games.append(game)
+                        seen_game_ids.add(game_id)
+                        print(f"      [{api_name}] Agregado: {game['away_team']} @ {game['home_team']}")
+            except Exception:
+                pass
+
+        return all_games
+    
+    def get_todays_games_combined(self, date: str = None) -> List[Dict]:
+        """
+            ALTERNATIVA: Obtiene partidos de TODAS las APIs y combina resultados.
+            Usa esto si algunos partidos se pierden.
+            Cambio de implementación: en lugar de usar la primera API que funcione,
+        recolecta de todas ellas y elimina duplicados.
+        """
+        try:
+            if date is None:
+                date = self._get_default_game_date()
+
+            if date in self._games_cache:
+                cached_games = self._games_cache[date]
+                if cached_games:
+                    print(f"   📦 Usando cache para fecha {date} ({len(cached_games)} partidos)")
+                    return cached_games
+            
+            print(f"📅 Buscando partidos para: {date} (ET - Eastern Time)")
+            print(f"   Recolectando de TODAS las APIs...\n")
+            
+            all_games = self._get_all_available(date)
+            
+            if all_games:
+                print(f"\n✅ Total de partidos combinados: {len(all_games)}\n")
+            else:
+                print(f"\n❌ No se encontraron partidos en ninguna API\n")
+            
+            self._games_cache[date] = all_games
+            return all_games
+                
+        except Exception as e:
+            print(f"❌ Error crítico: {e}")
+            return []
+        
     def _get_games_from_live_scoreboard(self, date: str) -> List[Dict]:
         """Intenta obtener partidos desde el scoreboard live."""
         try:
@@ -149,7 +362,7 @@ class NBADataClient:
                 )
 
                 game_id = game.get('gameId') or game.get('gameID') or game.get('id')
-                game_time = (
+                raw_time = (
                     game.get('gameStatusText')
                     or game.get('gameStatus')
                     or game.get('gameClock')
@@ -157,6 +370,7 @@ class NBADataClient:
                     or game.get('gameDateTimeUTC')
                     or ''
                 )
+                game_time = self._normalize_game_time(date, raw_time)
 
                 if not game_id or home_team_id is None or away_team_id is None:
                     continue
@@ -169,37 +383,51 @@ class NBADataClient:
             return []
 
     def _get_games_from_scoreboard_v2(self, date: str) -> List[Dict]:
-        """Obtiene partidos usando ScoreboardV2 como fallback."""
+        """Obtiene partidos usando ScoreboardV3 (mejor: formato moderno, horarios precisos)."""
         try:
-            board = scoreboardv2.ScoreboardV2(game_date=date)
-            games_header = board.game_header.get_dict()
-
-            if not games_header.get('data'):
+            time.sleep(0.6)
+            board = scoreboardv3.ScoreboardV3(game_date=date)
+            data = board.get_dict()
+            
+            if not data or 'scoreboard' not in data or 'games' not in data['scoreboard']:
                 return []
-
-            headers = games_header.get('headers', [])
-            idx_game_id = headers.index('GAME_ID')
-            idx_home_id = headers.index('HOME_TEAM_ID')
-            idx_away_id = headers.index('VISITOR_TEAM_ID')
-            idx_status = headers.index('GAME_STATUS_TEXT')
-
+            
             parsed_games = []
-            for row in games_header['data']:
+            for game in data['scoreboard']['games']:
+                game_id = game.get('gameId')
+                
+                home_team = game.get('homeTeam', {})
+                away_team = game.get('awayTeam', {})
+                
+                home_team_id = home_team.get('teamId')
+                away_team_id = away_team.get('teamId')
+                
+                if not game_id or not home_team_id or not away_team_id:
+                    continue
+                
+                # Obtener horario del juego
+                game_time = game.get('gameTimeUTC')  # ISO format
+                if not game_time:
+                    game_time = self._normalize_game_time(date, f"{date} 8:00 PM ET")
+                
                 parsed_games.append(self._build_game_info(
-                    row[idx_game_id],
-                    row[idx_home_id],
-                    row[idx_away_id],
-                    row[idx_status]
+                    game_id,
+                    home_team_id,
+                    away_team_id,
+                    game_time
                 ))
-
+            
             return parsed_games
         except Exception as e:
-            print(f"Error obteniendo partidos desde ScoreboardV2 para {date}: {e}")
+            print(f"Error obteniendo partidos desde ScoreboardV3 para {date}: {e}")
             return []
 
     def _get_games_from_league_game_finder(self, date: str) -> List[Dict]:
-        """Intenta reconstruir el calendario del día con LeagueGameFinder."""
+        """Fallback: Intenta reconstruir el calendario del día con LeagueGameFinder (solo fechas)."""
         try:
+            time.sleep(0.6)
+            # NOTA: LeagueGameFinder solo devuelve fechas, no horarios
+            # Se usa como último recurso cuando ScoreboardV2 y otros fallan
             finder = leaguegamefinder.LeagueGameFinder(
                 season_nullable=self.current_season,
                 date_from_nullable=date,
@@ -227,11 +455,18 @@ class NBADataClient:
                 if home_row is None or away_row is None:
                     continue
 
+                home_id = int(home_row['TEAM_ID'])
+                away_id = int(away_row['TEAM_ID'])
+                
+                # LeagueGameFinder solo da fechas. Usar medianoche ET como hora por defecto
+                # (el Live Tracker usará BoxScoreTraditionalV2 que sí tiene stats)
+                game_time = self._normalize_game_time(date, f"{date} 8:00 PM ET")
+
                 parsed_games.append(self._build_game_info(
                     game_id,
-                    int(home_row['TEAM_ID']),
-                    int(away_row['TEAM_ID']),
-                    str(home_row.get('GAME_DATE', date))
+                    home_id,
+                    away_id,
+                    game_time
                 ))
 
             return parsed_games
@@ -244,47 +479,102 @@ class NBADataClient:
         Obtiene todos los partidos programados para una fecha específica.
         
         Args:
-            date: Fecha en formato 'YYYY-MM-DD'. Si es None, usa la fecha actual.
-        
+            date: Fecha en formato 'YYYY-MM-DD' (interpretada como ET)
+                Si es None, usa la fecha actual en ET
+
         Returns:
-            Lista de diccionarios con información de cada partido:
-            - game_id: ID único del partido
-            - home_team: Equipo local
-            - away_team: Equipo visitante
-            - game_time: Hora del partido
-            - home_team_id: ID del equipo local
-            - away_team_id: ID del equipo visitante
+            Lista de diccionarios con información de cada partido
         """
         try:
-            # Si no se especifica fecha, usar el día actual en hora de Nueva York.
             if date is None:
                 date = self._get_default_game_date()
 
+            # Verificar caché primero
             if date in self._games_cache:
-                return self._games_cache[date]
+                cached_games = self._games_cache[date]
+                if cached_games:  # Solo usar caché si no está vacío
+                    print(f"   📦 Usando cache para fecha {date} ({len(cached_games)} partidos)")
+                    return cached_games
             
-            print(f"📅 Buscando partidos para: {date}")
+            print(f"📅 Buscando partidos para: {date} (ET - Eastern Time)")
+            print(f"   Intentando múltiples APIs...\n")
             
             todays_games = []
+            api_source = None
 
-            # Para el día actual, primero intentamos el scoreboard live.
-            if date == self._get_default_game_date():
-                todays_games = self._get_games_from_live_scoreboard(date)
+            # INTENTO 1: API estática (la más confiable, pero puede bloquearse)
+            print("   [1/5] Intentando API estática NBC...")
+            try:
+                todays_games = self._get_games_from_static_api(date)
+                if todays_games:
+                    api_source = "API Estática NBC"
+                    print(f"   ✅ Éxito con API estática: {len(todays_games)} partidos\n")
+                    self._games_cache[date] = todays_games
+                    return todays_games
+                else:
+                    print(f"   ⚠️  API estática: 0 partidos (puede ser correcto si no hay juegos)\n")
+            except Exception as e:
+                print(f"   ❌ Error en API estática: {str(e)[:60]}...\n")
 
-            # Si el live scoreboard no trae nada, caemos a ScoreboardV2.
-            if not todays_games:
+            # INTENTO 2: ScoreboardV3 (PRIORIDAD ALTA - formato moderno, horarios precisos)
+            print("   [2/5] Intentando ScoreboardV3 (API moderna con horarios)...")
+            try:
                 todays_games = self._get_games_from_scoreboard_v2(date)
+                if todays_games:
+                    api_source = "ScoreboardV3"
+                    print(f"   ✅ Éxito con ScoreboardV3: {len(todays_games)} partidos\n")
+                    self._games_cache[date] = todays_games
+                    return todays_games
+                else:
+                    print(f"   ⚠️  ScoreboardV3: 0 partidos\n")
+            except Exception as e:
+                print(f"   ❌ Error en ScoreboardV3: {str(e)[:60]}...\n")
 
-            # Último fallback: LeagueGameFinder, útil cuando los calendarios de playoff
-            # tardan en reflejarse en los endpoints de scoreboard.
-            if not todays_games:
+            # INTENTO 3: Live Scoreboard (en tiempo real, bueno para hoy)
+            print("   [3/5] Intentando Live Scoreboard (en tiempo real)...")
+            if not todays_games and date == self._get_default_game_date():
+                try:
+                    todays_games = self._get_games_from_live_scoreboard(date)
+                    if todays_games:
+                        api_source = "Live Scoreboard"
+                        print(f"   ✅ Éxito con Live Scoreboard: {len(todays_games)} partidos\n")
+                        self._games_cache[date] = todays_games
+                        return todays_games
+                    else:
+                        print(f"   ⚠️  Live Scoreboard: 0 partidos\n")
+                except Exception as e:
+                    print(f"   ❌ Error en Live Scoreboard: {str(e)[:60]}...\n")
+
+            # INTENTO 4: LeagueGameFinder (ALTERNATIVA - solo fechas sin scraping)
+            print("   [4/5] Intentando LeagueGameFinder (sin horarios, pero confiable)...")
+            try:
                 todays_games = self._get_games_from_league_game_finder(date)
+                if todays_games:
+                    api_source = "LeagueGameFinder"
+                    print(f"   ✅ Éxito con LeagueGameFinder: {len(todays_games)} partidos\n")
+                    print(f"   ⚠️  ADVERTENCIA: LeagueGameFinder devuelve solo fechas.")
+                    print(f"   Intentando obtener horarios desde fuentes adicionales...\n")
+                    self._games_cache[date] = todays_games
+                    return todays_games
+                else:
+                    print(f"   ⚠️  LeagueGameFinder: 0 partidos\n")
+            except Exception as e:
+                print(f"   ❌ Error en LeagueGameFinder: {str(e)[:60]}...\n")
 
-            self._games_cache[date] = todays_games
-            return todays_games
+            # Si llegamos aquí, no hay partidos de ninguna API
+            print("❌ No se encontraron partidos en ninguna API")
+            print("   Posibles razones:")
+            print("   - No hay partidos programados para esa fecha")
+            print("   - Las APIs están bloqueadas/fuera de servicio")
+            print("   - Hay un error de configuración")
             
+            self._games_cache[date] = []
+            return []
+                
         except Exception as e:
-            print(f"Error obteniendo partidos del día: {e}")
+            print(f"❌ Error crítico obteniendo partidos del día: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_injury_report(self) -> pd.DataFrame:
@@ -571,19 +861,37 @@ class NBADataClient:
             print(f"Error obteniendo rating defensivo para equipo {team_id}: {e}")
             return {}
     
-    def get_active_players_for_game(self, home_team_id: int, away_team_id: int) -> Dict[str, List[int]]:
+    def get_active_players_for_game(self, home_team_id: int, away_team_id: int, game_date_utc: str = None, game_id: str = None, as_of_date: str = None) -> Dict[str, List[int]]:
         """
         Obtiene los jugadores activos (no lesionados) de ambos equipos para un partido.
-        Usa el roster oficial actual y filtra por minutos y lesiones.
+        
+        Estrategia:
+        1. Si game_id está disponible → intenta usar boxscore (para partidos completados)
+        2. Si falla o no hay game_id → usa roster + reporte de lesiones de hoy
         
         Args:
             home_team_id: ID del equipo local
             away_team_id: ID del equipo visitante
+            game_date_utc: Fecha del partido en UTC (opcional)
+            game_id: ID del partido (si es disponible, permite usar boxscore)
+            as_of_date: Fecha de referencia (opcional)
             
         Returns:
             Diccionario con listas de IDs de jugadores activos por equipo
         """
         try:
+            # PRIORIDAD 1: Si tenemos game_id y el partido está completado, usar boxscore
+            if game_id:
+                print(f"📊 Intentando obtener jugadores reales del boxscore para {game_id}...")
+                boxscore_players = self._get_players_from_boxscore(game_id)
+                
+                if boxscore_players['home'] and boxscore_players['away']:
+                    print(f"✅ {len(boxscore_players['home'])} jugadores del equipo local, {len(boxscore_players['away'])} visitantes (desde boxscore)")
+                    return boxscore_players
+            
+            # FALLBACK: Usar roster + reporte de lesiones de hoy
+            print("📋 Fallback: usando roster + reporte de lesiones actual...")
+            
             # Obtener reporte de lesiones
             injury_df = self.get_injury_report()
             
@@ -610,12 +918,14 @@ class NBADataClient:
                     # Procesar lista de lesionados
                     if not injury_df.empty:
                         if 'Current_Status' in injury_df.columns:
-                            # Filtrar solo los que están definitivamente fuera
-                            out_players = injury_df[injury_df['Current_Status'].isin(['Out', 'Doubtful'])]
+                            # Estados que consideramos como no disponible para jugar
+                            unavailable_states = ['Out', 'Doubtful', 'Questionable', 'Day-To-Day']
+                            out_players = injury_df[injury_df['Current_Status'].isin(unavailable_states)]
                             if 'PLAYER_NAME' in out_players.columns:
                                 for name in out_players['PLAYER_NAME'].values:
                                     normalized_injured_names.add(self._normalize_name(name))
                         elif 'PLAYER_NAME' in injury_df.columns:
+                            # Si no hay columna de estado, marcar todos los listados como lesionados
                             for name in injury_df['PLAYER_NAME'].values:
                                 normalized_injured_names.add(self._normalize_name(name))
                     
@@ -667,51 +977,312 @@ class NBADataClient:
             print("Retornando listas vacías - se reintentará...")
             return {'home': [], 'away': []}
 
-    def get_live_game_stats(self, game_id: str) -> Dict:
+    def _get_players_from_boxscore(self, game_id: str) -> Dict[str, List[int]]:
         """
-        Obtiene estadísticas en tiempo real de un partido en curso.
+        Obtiene la lista de jugadores que realmente participaron en un partido completado.
+        Usando el boxscore como fuente de verdad para partidos pasados.
         
         Args:
-            game_id: ID del partido
+            game_id: ID del partido (ej. '0042500214')
             
         Returns:
-            Diccionario con estadísticas de jugadores en tiempo real
+            Diccionario con {'home': [player_ids], 'away': [player_ids]}
         """
         try:
-            # Usar el endpoint live boxscore
             box = boxscore.BoxScore(game_id=game_id)
             data = box.get_dict()
             
-            live_stats = {}
+            home_players = []
+            away_players = []
             
             if 'game' in data:
                 game_data = data['game']
                 
-                # Función auxiliar para procesar jugadores de un equipo
-                def process_team_players(team_data):
-                    team_code = team_data.get('teamTricode', '')
-                    for player in team_data.get('players', []):
-                        stats = player.get('statistics', {})
-                        live_stats[player['personId']] = {
-                            'name': player.get('name', 'Unknown'),
-                            'team': team_code,
-                            'pts': stats.get('points', 0),
-                            'reb': stats.get('reboundsTotal', 0),
-                            'ast': stats.get('assists', 0),
-                            'fg3m': stats.get('threePointersMade', 0),
-                            'stl': stats.get('steals', 0),
-                            'blk': stats.get('blocks', 0),
-                            'min': stats.get('minutes', '00:00')
-                        }
-
+                # Procesar jugadores del equipo local
                 if 'homeTeam' in game_data:
-                    process_team_players(game_data['homeTeam'])
+                    for player in game_data['homeTeam'].get('players', []):
+                        player_id = player.get('personId')
+                        stats = player.get('statistics', {})
+                        # Solo incluir si tiene minutos (jugó)
+                        if player_id and stats.get('minutes', '00:00') != '00:00':
+                            home_players.append(player_id)
                 
+                # Procesar jugadores del equipo visitante
                 if 'awayTeam' in game_data:
-                    process_team_players(game_data['awayTeam'])
+                    for player in game_data['awayTeam'].get('players', []):
+                        player_id = player.get('personId')
+                        stats = player.get('statistics', {})
+                        # Solo incluir si tiene minutos (jugó)
+                        if player_id and stats.get('minutes', '00:00') != '00:00':
+                            away_players.append(player_id)
+            
+            return {'home': home_players, 'away': away_players}
+            
+        except Exception as e:
+            print(f"Error obteniendo boxscore para {game_id}: {e}")
+            return {'home': [], 'away': []}
+
+    def _get_boxscore_stats_v2(self, game_id: str) -> Dict:
+        """Fallback: obtiene stats de jugadores desde BoxScoreTraditionalV2."""
+        try:
+            box = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+            players_df = box.player_stats.get_data_frame()
+
+            if players_df.empty:
+                return {}
+
+            stats_map = {}
+            for _, row in players_df.iterrows():
+                player_id = row.get('PLAYER_ID')
+                if not player_id:
+                    continue
+
+                stats_map[int(player_id)] = {
+                    'name': row.get('PLAYER_NAME', 'Unknown'),
+                    'team': row.get('TEAM_ABBREVIATION', ''),
+                    'pts': int(row.get('PTS', 0)),
+                    'reb': int(row.get('REB', 0)),
+                    'ast': int(row.get('AST', 0)),
+                    'fg3m': int(row.get('FG3M', 0)),
+                    'stl': int(row.get('STL', 0)),
+                    'blk': int(row.get('BLK', 0)),
+                    'min': row.get('MIN', '00:00')
+                }
+
+            return stats_map
+        except Exception as e:
+            print(f"Error obteniendo boxscore tradicional para {game_id}: {e}")
+            return {}
+
+    def get_live_game_stats(self, game_id: str) -> Dict:
+        """
+        Obtiene estadísticas en tiempo real de un partido usando ScoreboardV3 y BoxScoreTraditionalV2.
+        
+        Args:
+            game_id: ID del partido (ej. '0022400123')
+            
+        Returns:
+            Diccionario con estadísticas de jugadores formateado {player_id: {stats}}
+        """
+        live_stats = {}
+        
+        try:
+            # INTENTO 1: Usar BoxScore (live.nba) para partidos en curso
+            try:
+                from nba_api.live.nba.endpoints import boxscore as live_boxscore
+                box = live_boxscore.BoxScore(game_id=game_id)
+                data = box.get_dict()
+                
+                if 'game' in data and data['game']:
+                    game_data = data['game']
+                    game_status = game_data.get('gameStatusText', '')
+                    print(f"📊 Live BoxScore - Estado: {game_status}")
                     
+                    def safe_int(value, default=0):
+                        """Convierte a entero de forma segura, manejando NaN y None."""
+                        try:
+                            if value is None or (isinstance(value, float) and np.isnan(value)):
+                                return default
+                            return int(float(value))
+                        except (ValueError, TypeError):
+                            return default
+                    
+                    # Procesar jugadores del equipo local
+                    if 'homeTeam' in game_data:
+                        home_team = game_data['homeTeam']
+                        home_tricode = home_team.get('teamTricode', '')
+                        for player in home_team.get('players', []):
+                            stats = player.get('statistics', {}) or {}
+                            player_id = player.get('personId')
+                            player_name = player.get('name', '')
+                            
+                            if player_id and player_name:
+                                live_stats[player_id] = {
+                                    'name': str(player_name).strip(),
+                                    'name_first': str(player.get('nameFirst', '')).strip(),
+                                    'name_last': str(player.get('nameLast', '')).strip(),
+                                    'team': home_tricode,
+                                    'pts': safe_int(stats.get('points')),
+                                    'reb': safe_int(stats.get('reboundsTotal')),
+                                    'ast': safe_int(stats.get('assists')),
+                                    'fg3m': safe_int(stats.get('threePointersMade')),
+                                    'stl': safe_int(stats.get('steals')),
+                                    'blk': safe_int(stats.get('blocks')),
+                                    'min': str(stats.get('minutesCalculated', '00:00'))
+                                }
+                    
+                    # Procesar jugadores del equipo visitante
+                    if 'awayTeam' in game_data:
+                        away_team = game_data['awayTeam']
+                        away_tricode = away_team.get('teamTricode', '')
+                        for player in away_team.get('players', []):
+                            stats = player.get('statistics', {}) or {}
+                            player_id = player.get('personId')
+                            player_name = player.get('name', '')
+                            
+                            if player_id and player_name:
+                                live_stats[player_id] = {
+                                    'name': str(player_name).strip(),
+                                    'name_first': str(player.get('nameFirst', '')).strip(),
+                                    'name_last': str(player.get('nameLast', '')).strip(),
+                                    'team': away_tricode,
+                                    'pts': safe_int(stats.get('points')),
+                                    'reb': safe_int(stats.get('reboundsTotal')),
+                                    'ast': safe_int(stats.get('assists')),
+                                    'fg3m': safe_int(stats.get('threePointersMade')),
+                                    'stl': safe_int(stats.get('steals')),
+                                    'blk': safe_int(stats.get('blocks')),
+                                    'min': str(stats.get('minutesCalculated', '00:00'))
+                                }
+                    
+                    if live_stats:
+                        print(f"✅ Live BoxScore: {len(live_stats)} jugadores encontrados")
+                        print(f"   Nombres de ejemplo: {list(live_stats.values())[:3]}")
+                        return live_stats
+                        
+            except Exception as e:
+                print(f"⚠️ Live BoxScore no disponible: {e}")
+            
+            # INTENTO 2: Usar BoxScoreTraditionalV2 para partidos finalizados
+            if not live_stats:
+                print("📊 Intentando BoxScoreTraditionalV2...")
+                try:
+                    import time
+                    time.sleep(0.6)
+                    
+                    box_v2 = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+                    players_df = box_v2.player_stats.get_data_frame()
+                    
+                    if not players_df.empty:
+                        # Mostrar columnas disponibles para debug
+                        print(f"   Columnas BoxScoreTraditionalV2: {list(players_df.columns)}")
+                        
+                        # Limpiar valores NaN
+                        players_df = players_df.fillna(0)
+                        
+                        for _, row in players_df.iterrows():
+                            player_id = row.get('PLAYER_ID')
+                            if not player_id or player_id == 0:
+                                continue
+                            
+                            player_id = int(player_id)
+                            player_name = str(row.get('PLAYER_NAME', '')).strip()
+                            
+                            if not player_name:
+                                continue
+                            
+                            # Convertir minutos de forma segura
+                            minutes = row.get('MIN')
+                            if minutes is None or (isinstance(minutes, float) and np.isnan(minutes)):
+                                minutes_str = '00:00'
+                            else:
+                                minutes_str = str(minutes)
+                            
+                            live_stats[player_id] = {
+                                'name': player_name,
+                                'name_first': '',
+                                'name_last': '',
+                                'team': str(row.get('TEAM_ABBREVIATION', '')).strip(),
+                                'pts': int(float(row.get('PTS', 0))),
+                                'reb': int(float(row.get('REB', 0))),
+                                'ast': int(float(row.get('AST', 0))),
+                                'fg3m': int(float(row.get('FG3M', 0))),
+                                'stl': int(float(row.get('STL', 0))),
+                                'blk': int(float(row.get('BLK', 0))),
+                                'min': minutes_str
+                            }
+                        
+                        print(f"✅ BoxScoreTraditionalV2: {len(live_stats)} jugadores encontrados")
+                        print(f"   Nombres de ejemplo: {list(live_stats.values())[:3]}")
+                        return live_stats
+                        
+                except Exception as e:
+                    print(f"⚠️ BoxScoreTraditionalV2 no disponible: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # INTENTO 3: ScoreboardV3 para obtener estado del partido
+            if not live_stats:
+                print("📊 Intentando ScoreboardV3 para obtener estado...")
+                try:
+                    # Extraer fecha del game_id (formato: 00XYYMMDDX)
+                    if len(game_id) >= 8:
+                        date_part = game_id[-8:]
+                        year = "20" + date_part[0:2]
+                        month = date_part[2:4]
+                        day = date_part[4:6]
+                        game_date = f"{year}-{month}-{day}"
+                        
+                        import time
+                        time.sleep(0.6)
+                        
+                        board = scoreboardv3.ScoreboardV3(game_date=game_date)
+                        data = board.get_dict()
+                        
+                        for game in data.get('scoreboard', {}).get('games', []):
+                            if game.get('gameId') == game_id:
+                                status_text = game.get('gameStatusText', 'Unknown')
+                                print(f"  Estado: {status_text}")
+                                
+                                # Si el partido finalizó, intentar boxscore de nuevo con ID corregido
+                                if 'Final' in str(status_text):
+                                    print("  Partido finalizado - intentando BoxScoreTraditionalV2 nuevamente...")
+                                    try:
+                                        import time
+                                        time.sleep(0.6)
+                                        
+                                        box_v2 = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+                                        players_df = box_v2.player_stats.get_data_frame()
+                                        
+                                        if not players_df.empty:
+                                            players_df = players_df.fillna(0)
+                                            
+                                            for _, row in players_df.iterrows():
+                                                player_id = row.get('PLAYER_ID')
+                                                if not player_id or player_id == 0:
+                                                    continue
+                                                
+                                                player_id = int(player_id)
+                                                player_name = str(row.get('PLAYER_NAME', '')).strip()
+                                                
+                                                if not player_name:
+                                                    continue
+                                                
+                                                live_stats[player_id] = {
+                                                    'name': player_name,
+                                                    'name_first': '',
+                                                    'name_last': '',
+                                                    'team': str(row.get('TEAM_ABBREVIATION', '')).strip(),
+                                                    'pts': int(float(row.get('PTS', 0))),
+                                                    'reb': int(float(row.get('REB', 0))),
+                                                    'ast': int(float(row.get('AST', 0))),
+                                                    'fg3m': int(float(row.get('FG3M', 0))),
+                                                    'stl': int(float(row.get('STL', 0))),
+                                                    'blk': int(float(row.get('BLK', 0))),
+                                                    'min': str(row.get('MIN', '00:00'))
+                                                }
+                                            
+                                            if live_stats:
+                                                print(f"✅ BoxScore recuperado: {len(live_stats)} jugadores")
+                                                return live_stats
+                                    except Exception as e2:
+                                        print(f"  Error en reintento BoxScore: {e2}")
+                                
+                                # Si aún no hay datos, retornar estado
+                                return {
+                                    'status': status_text,
+                                    'period': game.get('period', 0),
+                                    'clock': game.get('gameClock', ''),
+                                    'home_score': game.get('homeTeam', {}).get('score', 0),
+                                    'away_score': game.get('awayTeam', {}).get('score', 0)
+                                }
+                except Exception as e:
+                    print(f"⚠️ ScoreboardV3 no disponible: {e}")
+            
             return live_stats
             
         except Exception as e:
-            print(f"Error obteniendo stats en vivo para {game_id}: {e}")
+            print(f"❌ Error obteniendo stats en vivo: {e}")
+            import traceback
+            traceback.print_exc()
             return {}

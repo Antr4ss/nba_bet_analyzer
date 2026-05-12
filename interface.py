@@ -745,18 +745,21 @@ def analyze_game(game_id: str, date: str = None) -> Dict:
         return {}
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_live_game_stats(game_id: str) -> Dict:
     """Obtiene estadísticas en tiempo real de un partido."""
     try:
         response = requests.get(
             f"{BACKEND_URL}/api/live/game/{game_id}",
-            timeout=10
+            timeout=15
         )
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            print(f"📊 Live stats recibidos: {len(data)} jugadores")
+            return data
         return {}
-    except Exception:
+    except Exception as e:
+        print(f"Error obteniendo live stats: {e}")
         return {}
 
 
@@ -820,14 +823,29 @@ def format_game_time(
     try:
         et_zone = tz.gettz('America/New_York')
         col_zone = tz.gettz('America/Bogota')
+        utc_zone = tz.gettz('UTC')
 
-        # Parsear el timestamp y asignarle zona ET (el campo viene sin offset explícito)
-        et_time = parser.parse(game_time_str)
-        if et_time.tzinfo is None:
-            et_time = et_time.replace(tzinfo=et_zone)
+        parsed_time = parser.parse(game_time_str)
 
-        # Convertir a Colombia
-        col_time = et_time.astimezone(col_zone)
+        if parsed_time.tzinfo is None:
+            # Heuristica: si el usuario eligio fecha, escoger la zona que conserve el dia en COT.
+            et_time = parsed_time.replace(tzinfo=et_zone).astimezone(col_zone)
+            utc_time = parsed_time.replace(tzinfo=utc_zone).astimezone(col_zone)
+
+            if display_date:
+                et_matches = et_time.strftime('%Y-%m-%d') == display_date
+                utc_matches = utc_time.strftime('%Y-%m-%d') == display_date
+                if utc_matches and not et_matches:
+                    col_time = utc_time
+                elif et_matches and not utc_matches:
+                    col_time = et_time
+                else:
+                    col_time = utc_time
+            else:
+                col_time = utc_time
+        else:
+            col_time = parsed_time.astimezone(col_zone)
+
         if display_date and display_date != col_time.strftime('%Y-%m-%d'):
             return f"{display_date[8:10]}/{display_date[5:7]}/{display_date[0:4]} {col_time.strftime('%I:%M %p COT')}"
         return col_time.strftime('%d/%m/%Y %I:%M %p COT')
@@ -1353,102 +1371,199 @@ def main():
                 with tab4:
                     st.subheader("🔴 Seguimiento en Vivo")
                     
-                    col_refresh, _ = st.columns([1, 4])
+                    col_refresh, col_status = st.columns([1, 3])
                     with col_refresh:
                         if st.button("🔄 Actualizar Stats", key="refresh_live"):
+                            get_live_game_stats.clear()
                             st.rerun()
-                        
+                    
                     live_stats = get_live_game_stats(selected_game['game_id'])
                     
+                    # Verificar si tenemos datos
                     if not live_stats:
-                        st.info("El partido no ha comenzado o no hay datos disponibles aún.")
+                        st.info("⏳ El partido no ha comenzado o no hay datos disponibles aún.")
+                        st.caption("Los datos se actualizarán automáticamente cuando el partido inicie.")
+                        st.caption(f"Game ID: {selected_game['game_id']}")
+                    elif 'status' in live_stats and 'period' in live_stats:
+                        # Es un diccionario de estado
+                        with col_status:
+                            game_status = live_stats.get('status', 'Unknown')
+                            period = live_stats.get('period', 0)
+                            clock = live_stats.get('clock', '')
+                            
+                            st.info(f"📊 Estado: **{game_status}** | Cuarto: {period} | Reloj: {clock}")
+                            st.metric("Local", live_stats.get('home_score', 0))
+                            st.metric("Visitante", live_stats.get('away_score', 0))
                     else:
+                        # Tenemos estadísticas de jugadores
+                        with col_status:
+                            st.success(f"✅ Datos disponibles para {len(live_stats)} jugadores")
+                        
                         st.markdown("#### 📊 Progreso de Oportunidades Detectadas")
                         
                         if not analysis.get('best_bets'):
                             st.info("No hay apuestas sugeridas para rastrear.")
                         else:
+                            # Función de normalización de nombres mejorada
+                            def normalize_player_name(name: str) -> str:
+                                """Normaliza un nombre para comparación."""
+                                if not name:
+                                    return ""
+                                # Eliminar acentos, convertir a minúsculas, eliminar puntuación
+                                import unicodedata
+                                import re
+                                name = unicodedata.normalize('NFKD', str(name))
+                                name = ''.join([c for c in name if not unicodedata.combining(c)])
+                                name = name.lower().strip()
+                                # Eliminar sufijos como Jr., III, etc.
+                                name = re.sub(r'\b(jr|sr|ii|iii|iv|v)\.?$', '', name).strip()
+                                return name
+                            
+                            def find_player_in_live_stats(player_name: str, live_stats: Dict) -> Dict:
+                                """Busca un jugador en live_stats con comparación flexible."""
+                                if not player_name or not live_stats:
+                                    return None
+                                
+                                norm_name = normalize_player_name(player_name)
+                                name_parts = norm_name.split()
+                                
+                                # Intentar coincidencia exacta primero
+                                for pid, pdata in live_stats.items():
+                                    if not isinstance(pdata, dict):
+                                        continue
+                                    
+                                    live_name = normalize_player_name(pdata.get('name', ''))
+                                    if live_name == norm_name:
+                                        return pdata
+                                
+                                # Coincidencia por nombre y apellido
+                                for pid, pdata in live_stats.items():
+                                    if not isinstance(pdata, dict):
+                                        continue
+                                    
+                                    live_name = normalize_player_name(pdata.get('name', ''))
+                                    # Si ambos nombres tienen al menos 2 partes, comparar
+                                    if len(name_parts) >= 2:
+                                        if all(part in live_name for part in name_parts if len(part) > 1):
+                                            return pdata
+                                
+                                # Coincidencia por nombre_first y nombre_last
+                                for pid, pdata in live_stats.items():
+                                    if not isinstance(pdata, dict):
+                                        continue
+                                    
+                                    first = normalize_player_name(pdata.get('name_first', ''))
+                                    last = normalize_player_name(pdata.get('name_last', ''))
+                                    
+                                    if first and last:
+                                        if first in norm_name and last in norm_name:
+                                            return pdata
+                                        if norm_name in f"{first} {last}":
+                                            return pdata
+                                
+                                # Coincidencia parcial (nombre contiene partes del otro)
+                                for pid, pdata in live_stats.items():
+                                    if not isinstance(pdata, dict):
+                                        continue
+                                    
+                                    live_name = normalize_player_name(pdata.get('name', ''))
+                                    # Si el nombre normalizado está contenido en el otro
+                                    if norm_name in live_name or live_name in norm_name:
+                                        if len(norm_name) > 5 and len(live_name) > 5:  # Evitar falsos positivos
+                                            return pdata
+                                
+                                return None
+                            
                             # Iterar sobre todas las apuestas sugeridas
                             for idx, bet in enumerate(analysis['best_bets']):
                                 player_name = bet['player_name']
                                 stat_type = bet['stat_type'].upper()
                                 target_line = bet['suggested_line']
-                                # Determinar tipo de apuesta (asumimos OVER si la proyección es mayor a la línea)
-                                # En la estructura actual no tenemos explícitamente 'recommended_bet' en todos los casos,
-                                # pero podemos inferirlo o usar 'recommended_bet' si existe.
+                                
+                                # Determinar tipo de apuesta
                                 bet_type = bet.get('recommended_bet', 'OVER')
                                 if 'recommended_bet' not in bet:
-                                    # Inferencia simple
                                     bet_type = 'OVER' if bet['projection'] > bet['suggested_line'] else 'UNDER'
-
-                                # Buscar stats del jugador en vivo
-                                player_live_data = None
-                                for pid, pdata in live_stats.items():
-                                    # Comparación flexible de nombres
-                                    if pdata['name'] == player_name or player_name in pdata['name'] or pdata['name'] in player_name:
-                                        player_live_data = pdata
-                                        break
                                 
-                                # Redondear línea para visualización (Enteros)
+                                # Buscar stats del jugador en vivo con la nueva función
+                                player_live_data = find_player_in_live_stats(player_name, live_stats)
+                                
+                                # Redondear línea para visualización
                                 display_line = int(round(target_line))
-
+                                
                                 # Contenedor para la tarjeta
                                 with st.container():
-                                    col_info, col_viz = st.columns([2, 3])
+                                    st.markdown(f"### {idx+1}. {player_name}")
+                                    
+                                    col_info, col_progress = st.columns([1, 2])
                                     
                                     with col_info:
-                                        st.markdown(f"**{player_name}**")
-                                        st.caption(f"{stat_type} - Línea: {display_line} ({bet_type})")
+                                        st.markdown(f"**{stat_type}** - Línea: {display_line} ({bet_type})")
+                                        st.caption(f"Calidad: {bet.get('bet_quality', 'N/A')} | Confianza: {bet.get('confidence', 0):.0f}%")
                                         
                                         if player_live_data:
-                                            # Calcular valor actual (Soporte para PRA)
+                                            # Calcular valor actual
                                             if stat_type == 'PRA':
                                                 current_val = (player_live_data.get('pts', 0) + 
                                                              player_live_data.get('reb', 0) + 
                                                              player_live_data.get('ast', 0))
                                             else:
-                                                current_val = player_live_data.get(stat_type.lower(), 0)
-                                                
-                                            st.metric("Actual", current_val, delta=f"{current_val - display_line}")
+                                                stat_key = stat_type.lower()
+                                                current_val = player_live_data.get(stat_key, 0)
+                                            
+                                            st.metric(
+                                                "Actual", 
+                                                current_val, 
+                                                delta=int(current_val - display_line)
+                                            )
+                                            
+                                            # Mostrar minutos jugados
+                                            minutes = player_live_data.get('min', '00:00')
+                                            st.caption(f"Minutos: {minutes}")
                                         else:
-                                            st.warning("Sin datos")
-
-                                    with col_viz:
+                                            st.warning(f"Sin datos de {player_name}")
+                                            # Debug: mostrar nombres disponibles
+                                            available_names = []
+                                            for pid, pdata in live_stats.items():
+                                                if isinstance(pdata, dict) and 'name' in pdata:
+                                                    available_names.append(pdata['name'])
+                                            if available_names:
+                                                with st.expander("🔍 Ver jugadores disponibles"):
+                                                    st.text("\n".join(sorted(available_names)[:20]))
+                                    
+                                    with col_progress:
                                         if player_live_data:
-                                            # Recalcular current_val para asegurar disponibilidad
                                             if stat_type == 'PRA':
                                                 current_val = (player_live_data.get('pts', 0) + 
                                                              player_live_data.get('reb', 0) + 
                                                              player_live_data.get('ast', 0))
                                             else:
-                                                current_val = player_live_data.get(stat_type.lower(), 0)
+                                                stat_key = stat_type.lower()
+                                                current_val = player_live_data.get(stat_key, 0)
                                             
                                             if bet_type == 'OVER':
-                                                # Barra de progreso para OVER
                                                 progress = min(current_val / display_line if display_line > 0 else 0, 1.0)
                                                 st.progress(progress)
                                                 
                                                 if current_val >= display_line:
-                                                    st.success(f"✅ ¡CUBIERTA! ({current_val})")
+                                                    st.success(f"✅ ¡CUBIERTA! ({current_val}/{display_line})")
                                                 else:
                                                     diff = display_line - current_val
-                                                    st.caption(f"Faltan {diff} para cubrir")
+                                                    st.warning(f"Faltan {diff} para cubrir ({current_val}/{display_line})")
                                             
-                                            else: # UNDER
-                                                # Barra de "Peligro" para UNDER
+                                            else:  # UNDER
                                                 risk = min(current_val / display_line if display_line > 0 else 0, 1.0)
-                                                st.progress(risk)
+                                                st.progress(risk, text=f"Peligro UNDER: {current_val}/{display_line}")
                                                 
                                                 if current_val > display_line:
-                                                    st.error(f"❌ PERDIDA ({current_val})")
+                                                    st.error(f"❌ PERDIDA ({current_val}/{display_line})")
                                                 else:
                                                     cushion = display_line - current_val
-                                                    st.success(f"✅ En juego (Margen: {cushion})")
+                                                    st.success(f"✅ En camino (Margen: {cushion})")
                                         else:
-                                            st.info("⏳ Esperando que ingrese al partido...")
+                                            st.info("⏳ Buscando datos del jugador...")
                                     
                                     st.markdown("---")
-            
             else:
                 st.warning("No se encontraron oportunidades de valor significativas para este partido.")
                 st.info("Esto puede deberse a que las líneas del mercado están muy ajustadas o faltan datos de jugadores.")

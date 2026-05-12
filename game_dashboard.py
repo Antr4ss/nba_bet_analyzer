@@ -942,12 +942,28 @@ def format_game_time(
     try:
         et_zone = tz.gettz('America/New_York')
         col_zone = tz.gettz('America/Bogota')
+        utc_zone = tz.gettz('UTC')
         
-        et_time = parser.parse(game_time_str)
-        if et_time.tzinfo is None:
-            et_time = et_time.replace(tzinfo=et_zone)
+        parsed_time = parser.parse(game_time_str)
+        if parsed_time.tzinfo is None:
+            # Heuristica: si el usuario eligio fecha, escoger la zona que conserve el dia en COT.
+            et_time = parsed_time.replace(tzinfo=et_zone).astimezone(col_zone)
+            utc_time = parsed_time.replace(tzinfo=utc_zone).astimezone(col_zone)
+
+            if display_date:
+                et_matches = et_time.strftime('%Y-%m-%d') == display_date
+                utc_matches = utc_time.strftime('%Y-%m-%d') == display_date
+                if utc_matches and not et_matches:
+                    col_time = utc_time
+                elif et_matches and not utc_matches:
+                    col_time = et_time
+                else:
+                    col_time = utc_time
+            else:
+                col_time = utc_time
+        else:
+            col_time = parsed_time.astimezone(col_zone)
         
-        col_time = et_time.astimezone(col_zone)
         if display_date and display_date != col_time.strftime('%Y-%m-%d'):
             return f"{display_date[8:10]}/{display_date[5:7]} {col_time.strftime('%I:%M %p COT')}"
         return col_time.strftime('%d/%m %I:%M %p COT')
