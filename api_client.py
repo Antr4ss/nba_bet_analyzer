@@ -1067,81 +1067,91 @@ class NBADataClient:
         live_stats = {}
         
         try:
-            # INTENTO 1: Usar BoxScore (live.nba) para partidos en curso
+            # INTENTO 1: Usar CDN directo para live boxscore
             try:
-                from nba_api.live.nba.endpoints import boxscore as live_boxscore
-                box = live_boxscore.BoxScore(game_id=game_id)
-                data = box.get_dict()
+                import requests
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.nba.com/',
+                    'Origin': 'https://www.nba.com',
+                    'Accept': 'application/json, text/plain, */*'
+                }
+                url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+                response = requests.get(url, headers=headers, timeout=5)
                 
-                if 'game' in data and data['game']:
-                    game_data = data['game']
-                    game_status = game_data.get('gameStatusText', '')
-                    print(f"📊 Live BoxScore - Estado: {game_status}")
-                    
-                    def safe_int(value, default=0):
-                        """Convierte a entero de forma segura, manejando NaN y None."""
-                        try:
-                            if value is None or (isinstance(value, float) and np.isnan(value)):
-                                return default
-                            return int(float(value))
-                        except (ValueError, TypeError):
-                            return default
-                    
-                    # Procesar jugadores del equipo local
-                    if 'homeTeam' in game_data:
-                        home_team = game_data['homeTeam']
-                        home_tricode = home_team.get('teamTricode', '')
-                        for player in home_team.get('players', []):
-                            stats = player.get('statistics', {}) or {}
-                            player_id = player.get('personId')
-                            player_name = player.get('name', '')
-                            
-                            if player_id and player_name:
-                                live_stats[player_id] = {
-                                    'name': str(player_name).strip(),
-                                    'name_first': str(player.get('nameFirst', '')).strip(),
-                                    'name_last': str(player.get('nameLast', '')).strip(),
-                                    'team': home_tricode,
-                                    'pts': safe_int(stats.get('points')),
-                                    'reb': safe_int(stats.get('reboundsTotal')),
-                                    'ast': safe_int(stats.get('assists')),
-                                    'fg3m': safe_int(stats.get('threePointersMade')),
-                                    'stl': safe_int(stats.get('steals')),
-                                    'blk': safe_int(stats.get('blocks')),
-                                    'min': str(stats.get('minutesCalculated', '00:00'))
-                                }
-                    
-                    # Procesar jugadores del equipo visitante
-                    if 'awayTeam' in game_data:
-                        away_team = game_data['awayTeam']
-                        away_tricode = away_team.get('teamTricode', '')
-                        for player in away_team.get('players', []):
-                            stats = player.get('statistics', {}) or {}
-                            player_id = player.get('personId')
-                            player_name = player.get('name', '')
-                            
-                            if player_id and player_name:
-                                live_stats[player_id] = {
-                                    'name': str(player_name).strip(),
-                                    'name_first': str(player.get('nameFirst', '')).strip(),
-                                    'name_last': str(player.get('nameLast', '')).strip(),
-                                    'team': away_tricode,
-                                    'pts': safe_int(stats.get('points')),
-                                    'reb': safe_int(stats.get('reboundsTotal')),
-                                    'ast': safe_int(stats.get('assists')),
-                                    'fg3m': safe_int(stats.get('threePointersMade')),
-                                    'stl': safe_int(stats.get('steals')),
-                                    'blk': safe_int(stats.get('blocks')),
-                                    'min': str(stats.get('minutesCalculated', '00:00'))
-                                }
-                    
-                    if live_stats:
-                        print(f"✅ Live BoxScore: {len(live_stats)} jugadores encontrados")
-                        print(f"   Nombres de ejemplo: {list(live_stats.values())[:3]}")
-                        return live_stats
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'game' in data and data['game']:
+                        game_data = data['game']
+                        game_status = game_data.get('gameStatusText', '')
+                        print(f"📊 Live BoxScore (CDN) - Estado: {game_status}")
                         
+                        def safe_int(value, default=0):
+                            """Convierte a entero de forma segura, manejando NaN y None."""
+                            try:
+                                if pd.isna(value):
+                                    return default
+                                return int(float(value))
+                            except (ValueError, TypeError, NameError):
+                                return default
+                        
+                        # Procesar jugadores del equipo local
+                        if 'homeTeam' in game_data:
+                            home_team = game_data['homeTeam']
+                            home_tricode = home_team.get('teamTricode', '')
+                            for player in home_team.get('players', []):
+                                stats = player.get('statistics', {}) or {}
+                                player_id = player.get('personId')
+                                player_name = player.get('name', '')
+                                
+                                if player_id and player_name:
+                                    live_stats[player_id] = {
+                                        'name': str(player_name).strip(),
+                                        'name_first': str(player.get('nameFirst', '')).strip(),
+                                        'name_last': str(player.get('nameLast', '')).strip(),
+                                        'team': home_tricode,
+                                        'pts': safe_int(stats.get('points')),
+                                        'reb': safe_int(stats.get('reboundsTotal')),
+                                        'ast': safe_int(stats.get('assists')),
+                                        'fg3m': safe_int(stats.get('threePointersMade')),
+                                        'stl': safe_int(stats.get('steals')),
+                                        'blk': safe_int(stats.get('blocks')),
+                                        'min': str(stats.get('minutesCalculated', '00:00'))
+                                    }
+                        
+                        # Procesar jugadores del equipo visitante
+                        if 'awayTeam' in game_data:
+                            away_team = game_data['awayTeam']
+                            away_tricode = away_team.get('teamTricode', '')
+                            for player in away_team.get('players', []):
+                                stats = player.get('statistics', {}) or {}
+                                player_id = player.get('personId')
+                                player_name = player.get('name', '')
+                                
+                                if player_id and player_name:
+                                    live_stats[player_id] = {
+                                        'name': str(player_name).strip(),
+                                        'name_first': str(player.get('nameFirst', '')).strip(),
+                                        'name_last': str(player.get('nameLast', '')).strip(),
+                                        'team': away_tricode,
+                                        'pts': safe_int(stats.get('points')),
+                                        'reb': safe_int(stats.get('reboundsTotal')),
+                                        'ast': safe_int(stats.get('assists')),
+                                        'fg3m': safe_int(stats.get('threePointersMade')),
+                                        'stl': safe_int(stats.get('steals')),
+                                        'blk': safe_int(stats.get('blocks')),
+                                        'min': str(stats.get('minutesCalculated', '00:00'))
+                                    }
+                        
+                        if live_stats:
+                            print(f"✅ Live BoxScore (CDN): {len(live_stats)} jugadores encontrados")
+                            print(f"   Nombres de ejemplo: {list(live_stats.values())[:3]}")
+                            return live_stats
+                else:
+                    print(f"⚠️ Live BoxScore (CDN) no disponible: {response.status_code}")
+                            
             except Exception as e:
-                print(f"⚠️ Live BoxScore no disponible: {e}")
+                print(f"⚠️ Error directo a CDN Live BoxScore: {e}")
             
             # INTENTO 2: Usar BoxScoreTraditionalV2 para partidos finalizados
             if not live_stats:
@@ -1173,7 +1183,7 @@ class NBADataClient:
                             
                             # Convertir minutos de forma segura
                             minutes = row.get('MIN')
-                            if minutes is None or (isinstance(minutes, float) and np.isnan(minutes)):
+                            if pd.isna(minutes):
                                 minutes_str = '00:00'
                             else:
                                 minutes_str = str(minutes)
@@ -1205,48 +1215,54 @@ class NBADataClient:
             if not live_stats:
                 print("📊 Intentando ScoreboardV3 para obtener estado...")
                 try:
-                    # Extraer fecha del game_id (formato: 00XYYMMDDX)
-                    if len(game_id) >= 8:
-                        date_part = game_id[-8:]
-                        year = "20" + date_part[0:2]
-                        month = date_part[2:4]
-                        day = date_part[4:6]
-                        game_date = f"{year}-{month}-{day}"
-                        
-                        import time
-                        time.sleep(0.6)
-                        
-                        board = scoreboardv3.ScoreboardV3(game_date=game_date)
-                        data = board.get_dict()
-                        
-                        for game in data.get('scoreboard', {}).get('games', []):
-                            if game.get('gameId') == game_id:
-                                status_text = game.get('gameStatusText', 'Unknown')
-                                print(f"  Estado: {status_text}")
-                                
-                                # Si el partido finalizó, intentar boxscore de nuevo con ID corregido
-                                if 'Final' in str(status_text):
-                                    print("  Partido finalizado - intentando BoxScoreTraditionalV2 nuevamente...")
-                                    try:
-                                        import time
-                                        time.sleep(0.6)
+                    # Si es en vivo, la fecha suele ser hoy (hora ET)
+                    # o se puede buscar usando hoy y ayer por si cruzamos la medianoche
+                    game_date = self._get_default_game_date()
+                    
+                    import time
+                    time.sleep(0.6)
+                    
+                    board = scoreboardv3.ScoreboardV3(game_date=game_date)
+                    data = board.get_dict()
+                    
+                    # Chequear también ayer si no encontramos
+                    games = data.get('scoreboard', {}).get('games', [])
+                    if not any(g.get('gameId') == game_id for g in games):
+                        try:
+                            yesterday = (pd.Timestamp.now(tz='America/New_York') - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+                            time.sleep(0.6)
+                            board2 = scoreboardv3.ScoreboardV3(game_date=yesterday)
+                            games.extend(board2.get_dict().get('scoreboard', {}).get('games', []))
+                        except Exception:
+                            pass
+
+                    for game in games:
+                        if game.get('gameId') == game_id:
+                            status_text = game.get('gameStatusText', 'Unknown')
+                            print(f"  Estado: {status_text}")
+                            
+                            # Si el partido finalizó, intentar boxscore de nuevo
+                            if 'Final' in str(status_text):
+                                print("  Partido finalizado - intentando BoxScoreTraditionalV2 nuevamente...")
+                                try:
+                                    time.sleep(0.6)
+                                    
+                                    box_v2 = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+                                    players_df = box_v2.player_stats.get_data_frame()
+                                    
+                                    if not players_df.empty:
+                                        players_df = players_df.fillna(0)
                                         
-                                        box_v2 = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
-                                        players_df = box_v2.player_stats.get_data_frame()
-                                        
-                                        if not players_df.empty:
-                                            players_df = players_df.fillna(0)
+                                        for _, row in players_df.iterrows():
+                                            player_id = row.get('PLAYER_ID')
+                                            if not player_id or player_id == 0:
+                                                continue
                                             
-                                            for _, row in players_df.iterrows():
-                                                player_id = row.get('PLAYER_ID')
-                                                if not player_id or player_id == 0:
-                                                    continue
-                                                
-                                                player_id = int(player_id)
-                                                player_name = str(row.get('PLAYER_NAME', '')).strip()
-                                                
-                                                if not player_name:
-                                                    continue
+                                            player_id = int(player_id)
+                                            player_name = str(row.get('PLAYER_NAME', '')).strip()
+                                            
+                                            if not player_name:
+                                                continue
                                                 
                                                 live_stats[player_id] = {
                                                     'name': player_name,
@@ -1265,8 +1281,8 @@ class NBADataClient:
                                             if live_stats:
                                                 print(f"✅ BoxScore recuperado: {len(live_stats)} jugadores")
                                                 return live_stats
-                                    except Exception as e2:
-                                        print(f"  Error en reintento BoxScore: {e2}")
+                                except Exception as e2:
+                                    print(f"  Error en reintento BoxScore: {e2}")
                                 
                                 # Si aún no hay datos, retornar estado
                                 return {
