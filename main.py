@@ -750,9 +750,9 @@ async def get_game_preview(game_id: str, date: str = None):
 
 # Ejecutar servidor
 if __name__ == "__main__":
-    print("🏀 Iniciando NBA Betting Analysis API...")
-    print("📊 Servidor corriendo en: http://localhost:8000")
-    print("📖 Documentación disponible en: http://localhost:8000/docs")
+    print("Iniciando NBA Betting Analysis API...")
+    print("Servidor corriendo en: http://localhost:8000")
+    print("Documentación disponible en: http://localhost:8000/docs")
     
     import os
     port = int(os.getenv("PORT", 8000))
@@ -763,3 +763,4 @@ if __name__ == "__main__":
         reload=False,
         log_level="info"
     )
+    

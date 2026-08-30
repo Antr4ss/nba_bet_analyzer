@@ -1,4 +1,4 @@
-# 🏀 NBA Betting Analyzer Pro
+# NBA Betting Analyzer Pro
 
 **NBA Betting Analyzer Pro** es una herramienta avanzada de análisis deportivo diseñada para identificar oportunidades de valor en el mercado de apuestas de la NBA. Utilizando datos en tiempo real, algoritmos de proyección estadística e inteligencia artificial, el sistema ofrece recomendaciones fundamentadas para Puntos, Rebotes, Asistencias y Triples.
 
@@ -9,28 +9,28 @@
 
 ---
 
-## 🚀 Funcionalidades Principales
+## Funcionalidades Principales
 
-### 1. 📊 Análisis Estadístico Avanzado
+### 1. Análisis Estadístico Avanzado
 El núcleo del sistema es un motor de proyección que calcula el rendimiento esperado de cada jugador basándose en múltiples factores temporales y contextuales.
 
-### 2. 🔴 Live Tracker (Seguimiento en Vivo)
+### 2. Live Tracker (Seguimiento en Vivo)
 Nueva funcionalidad que permite monitorear en tiempo real el progreso de tus apuestas sugeridas mientras se juega el partido.
 - **Actualización automática:** Se conecta al *live boxscore* de la NBA.
 - **Visualización intuitiva:** Barras de progreso para cada apuesta (OVER/UNDER).
 - **Soporte PRA:** Cálculo automático de Puntos + Rebotes + Asistencias en tiempo real.
 - **Alertas visuales:** Indicadores claros cuando una línea se cubre o se pierde.
 
-### 3. 🏥 Reporte de Lesiones Integrado
+### 3. Reporte de Lesiones Integrado
 Consulta automática de fuentes externas (ESPN) para filtrar jugadores lesionados o cuestionables, evitando recomendaciones sobre jugadores que no participarán.
 
-### 4. 📉 Detección de Tendencias y Fatiga
+### 4. Detección de Tendencias y Fatiga
 - **Back-to-Back:** Identifica equipos que jugaron el día anterior y aplica penalizaciones por fatiga.
 - **Hot Streaks:** Detecta jugadores con tendencia al alza en sus últimos 5 partidos.
 
 ---
 
-## 🧮 Cómo Funciona el Motor de Predicción
+## Cómo Funciona el Motor de Predicción
 
 El sistema utiliza un enfoque ponderado para calcular las proyecciones, priorizando el rendimiento reciente sobre el promedio de la temporada.
 
@@ -61,13 +61,13 @@ Es la métrica definitiva para ordenar las mejores apuestas. Combina el valor de
 
 ### 5. Calidad de la Apuesta
 El sistema etiqueta las oportunidades automáticamente:
-- **💎 EXCELENTE:** Confianza alta (>60%) + Tendencia al alza (Últimos 5 > Temporada).
-- **✅ BUENA:** Confianza alta o Proyección muy superior a la línea.
-- **⚠️ ARRIESGADA:** Proyección positiva pero baja consistencia.
+- **EXCELENTE:** Confianza alta (>60%) + Tendencia al alza (Últimos 5 > Temporada).
+- **BUENA:** Confianza alta o Proyección muy superior a la línea.
+- **ARRIESGADA:** Proyección positiva pero baja consistencia.
 
 ---
 
-## 🛠️ Stack Tecnológico y APIs
+## Stack Tecnológico y APIs
 
 El proyecto está construido con una arquitectura moderna de microservicios:
 
@@ -80,7 +80,7 @@ El proyecto está construido con una arquitectura moderna de microservicios:
 
 ---
 
-## 🔐 Autenticación Institucional Oficial (OIDC)
+## Autenticación Institucional Oficial (OIDC)
 
 Para integraciones de identidad, evita automatizar formularios web de login. Usa el método oficial del proveedor de identidad (OIDC/SAML/API institucional).
 
@@ -104,7 +104,7 @@ Si tu IdP no habilita Device Flow, solicita Authorization Code + PKCE o la API o
 
 ---
 
-## 📦 Instalación y Uso
+## Instalación y Uso
 
 1. **Clonar el repositorio**
 2. **Instalar dependencias:**
@@ -124,5 +124,5 @@ Si tu IdP no habilita Device Flow, solicita Authorization Code + PKCE o la API o
 
 ---
 
-## ⚠️ Disclaimer
+## Disclaimer
 *Esta herramienta es solo para fines educativos y de entretenimiento. Las apuestas deportivas conllevan riesgos financieros. El autor no se hace responsable de pérdidas económicas derivadas del uso de este software. Apuesta siempre con responsabilidad.*
